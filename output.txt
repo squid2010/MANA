@@ -1,0 +1,33 @@
+Sun Oct 26 2025 22:04:12 GMT-0400 (Eastern Daylight Time)
+f\\left(x,y\\right)=\\cos\\left(x\\right)-\\sin\\left(y\\right)
+i=-1.44
+h=3
+
+k=0.64
+s_{hadowRes}=0.63
+s_{hine}=121
+s_{urfaceColor}=\\left(0,0.75,1\\right)
+l_{ight}=\\left(3\\sin\\left(k\\right),3\\sin\\left(k\\right),h\\right)
+v_{iew}=\\frac{a}{\\left|a\\right|}\\operatorname{with}a=\\left(1,0.5,0.75\\right)
+c_{am}=20v_{iew}
+d_{cam}=\\operatorname{distance}\\left(c_{am},P\\right)
+d_{x}=\\frac{d}{dx}f\\left(x,y\\right)
+d_{y}=\\frac{d}{dy}f\\left(x,y\\right)
+n_{orm}=\\frac{a}{\\left|a\\right|}\\operatorname{with}a=\\left(-d_{x},-d_{y},1\\right)
+P=\\left(x,y,f\\left(x,y\\right)\\right)
+L=\\frac{l}{\\left|l\\right|}\\operatorname{with}l=l_{ight}-P
+V=\\frac{v}{\\left|v\\right|}\\operatorname{with}v=c_{am}-P
+R=2\\left(n_{orm}\\cdot L\\right)n_{orm}-L
+a_{tt}=\\frac{1}{1+0.0025\\operatorname{distance}\\left(l_{ight},P\\right)^{3}}
+d_{iff}=a_{tt}\\max\\left(0,n_{orm}\\cdot L\\right)
+s_{pec}=\\max\\left(0,R\\cdot V\\right)^{s_{hine}}
+c_{1}=\\operatorname{rgb}\\left(255\\left(\\left(s_{c}.xa_{mb}+\\left(s_{c}.xd_{iff}+s_{pec}\\right)S\\right)\\left(1-f_{og}\\right)+f_{og}\\right),255\\left(\\left(s_{c}.ya_{mb}+\\left(s_{c}.yd_{iff}+s_{pec}\\right)S\\right)\\left(1-f_{og}\\right)+f_{og}\\right),255\\left(\\left(s_{c}.za_{mb}+\\left(s_{c}.zd_{iff}+s_{pec}\\right)S\\right)\\left(1-f_{og}\\right)+f_{og}\\right)\\right)\\operatorname{with}s_{c}=s_{urfaceColor},S=s
+c_{2}=\\operatorname{hsv}\\left(0,0,1\\right)
+T=\\operatorname{join}\\left(0.00001,\\left[s_{hadowRes},2s_{hadowRes}...1\\right]\\right)
+z_{r}=z+T\\left(l_{ight}.z-z\\right)\\operatorname{with}z=f\\left(x,y\\right)
+s=1-m\\left(\\operatorname{total}\\left(\\left\\{f\\left(x+T\\left(l_{ight}.x-x\\right),y+T\\left(l_{ight}.y-y\\right)\\right)>z_{r}:1,0\\right\\}\\right)\\right)
+a_{mb}=0.5c_{l}\\left(0.5-0.25\\left|\\left(d_{x},d_{y}\\right)\\right|\\right)
+m\\left(x\\right)=\\left\\{x>1:1,0\\right\\}
+c_{l}\\left(x\\right)=\\left\\{x<0:0,x>1:1,x\\right\\}
+\\left(0,0,0\\right)
+f_{og}=1-e^{-\\left(0.045d_{cam}\\right)^{6}}
