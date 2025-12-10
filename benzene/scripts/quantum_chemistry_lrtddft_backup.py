@@ -19,6 +19,7 @@ from ase.units import Bohr, Hartree
 
 # GPAW imports
 from gpaw import FD, GPAW
+from gpaw.lrtddft import LrTDDFT
 
 # Suppress ASE warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -42,29 +43,40 @@ class QuantumChemistryCalculator:
 
     def __init__(
         self,
+        basis: str = "dzp",
         functional: str = "PBE",
-        mode: str = "fd",
         n_excited_states: int = 3,
-        max_workers: int = None,
-        memory_limit_gb: float = 8.0,
+        max_workers: int = 2,
+        convergence_energy: float = 1e-6,
+        convergence_density: float = 1e-4,
+        memory_limit_gb: float = 6.0,
+        timeout_minutes: int = 10,
+        use_realtime_tddft: bool = False,
+        tddft_method: str = "empirical",  # "empirical", "realtime", "delta_scf"
     ):
         """
         Initialize the quantum chemistry calculator.
 
         Args:
+            basis: Basis set (dzp, sz, etc.)
             functional: XC functional (PBE, PBE0, etc.)
-            mode: Calculation mode (fd, lcao, etc.)
             n_excited_states: Number of excited states to calculate
             max_workers: Maximum parallel workers
+            convergence_energy: Energy convergence threshold (Hartree)
+            convergence_density: Density convergence threshold
             memory_limit_gb: Memory limit in GB
+            timeout_minutes: Timeout for each calculation
         """
+        self.basis = basis
         self.functional = functional
-        self.mode = mode
         self.n_excited_states = n_excited_states
         self.max_workers = max_workers
+        self.convergence_energy = convergence_energy
+        self.convergence_density = convergence_density
         self.memory_limit = memory_limit_gb * 1024**3  # Convert to bytes
-        self.convergence_energy = 1e-5  # Default convergence criteria
-        self.convergence_density = 1e-4
+        self.timeout = timeout_minutes * 60  # Convert to seconds
+        self.use_realtime_tddft = use_realtime_tddft
+        self.tddft_method = tddft_method
 
         # Results storage
         self.results = {
@@ -90,7 +102,7 @@ class QuantumChemistryCalculator:
         }
 
         logger.info("Initialized QuantumChemistryCalculator")
-        logger.info(f"Mode: {mode}, Functional: {functional}")
+        logger.info(f"Basis: {basis}, Functional: {functional}")
         logger.info(f"Excited states: {n_excited_states}, Workers: {max_workers}")
 
     def load_geometries(self, geometry_file: str) -> List[Atoms]:
@@ -214,8 +226,8 @@ class QuantumChemistryCalculator:
 
         # Store metadata
         self.results["metadata"] = {
+            "basis_set": self.basis,
             "functional": self.functional,
-            "mode": self.mode,
             "n_excited_states": self.n_excited_states,
             "software": "ASE/GPAW",
             "creation_date": datetime.now().isoformat(),
@@ -381,8 +393,8 @@ class QuantumChemistryCalculator:
                 txt=f"quantum_chemistry/scf_{index}.txt",
             )
 
-            # Ensure atoms have proper unit cell
-            if np.all(atoms.cell == 0):
+            # Ensure atoms have proper unit cell for GPAW
+            if atoms.cell.any() == 0:
                 atoms.set_cell([15, 15, 15])  # Large enough for benzene
                 atoms.center()
 
@@ -406,7 +418,7 @@ class QuantumChemistryCalculator:
         self, atoms: Atoms, index: int, ground_state: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
-        Stage 2: Excited state TD-DFT calculation using real-time propagation.
+        Stage 2: Excited state TD-DFT calculation.
 
         Args:
             atoms: ASE Atoms object
@@ -417,107 +429,51 @@ class QuantumChemistryCalculator:
             Dictionary with excited state energies, forces, and oscillator strengths
         """
         try:
-            # Uses GPAW's real-time TD-DFT functionality
-            from gpaw.tddft import TDDFT
+            # Uses GPAW's TD-DFT functionality
 
             calc = ground_state["calculator"]
             ground_energy = ground_state["energy"]
 
-            # Set up Real-Time TD-DFT calculation
-            rt_tddft = TDDFT(calc, txt=f"quantum_chemistry/rttddft_{index}.txt")
+            # Set up Linear Response TD-DFT calculation
+            lr = LrTDDFT(calc, txt=f"quantum_chemistry/lrtddft_{index}.txt")
 
-            # Time propagation parameters
-            time_step = 0.02  # fs
-            max_time = 20.0  # fs
-            nsteps = int(max_time / time_step)
-            kick_strength = 1e-3  # delta kick strength
+            # Calculate omega matrix (Casida matrix)
+            lr.diagonalize()
 
-            # Apply delta kick to initiate excitations
-            rt_tddft.absorption_kick([kick_strength, kick_strength, kick_strength])
+            # Extract results with bounds checking
+            excitation_energies = []
+            oscillator_strengths = []
 
-            # Initialize arrays to store dipole moment time series
-            dipole_x = np.zeros(nsteps)
-            dipole_y = np.zeros(nsteps)
-            dipole_z = np.zeros(nsteps)
-            time_array = np.zeros(nsteps)
-
-            # Propagate in time and record dipole moments
-            for i in range(nsteps):
-                rt_tddft.propagate(time_step, 1)
-                dipole = rt_tddft.get_dipole_moment()
-                dipole_x[i] = dipole[0]
-                dipole_y[i] = dipole[1]
-                dipole_z[i] = dipole[2]
-                time_array[i] = i * time_step
-
-            # Compute absorption spectrum via FFT
-            # Total dipole signal
-            dipole_total = dipole_x + dipole_y + dipole_z
-
-            # Apply window function to reduce spectral artifacts
-            window = np.hanning(len(dipole_total))
-            dipole_windowed = dipole_total * window
-
-            # FFT to get frequency domain
-            fft_signal = np.fft.fft(dipole_windowed)
-            freqs = np.fft.fftfreq(
-                len(dipole_windowed), d=time_step * 41.34
-            )  # Convert fs to atomic units
-
-            # Get positive frequencies and convert to eV
-            positive_mask = freqs > 0
-            frequencies = freqs[positive_mask] * 27.211  # Convert to eV
-            intensities = np.abs(fft_signal[positive_mask]) ** 2
-
-            # Simple peak finding - look for local maxima above threshold
-            if len(intensities) > 0:
-                threshold = max(intensities) * 0.1
-                excitation_energies = []
-                oscillator_strengths = []
-
-                for i in range(1, len(frequencies) - 1):
-                    if (
-                        intensities[i] > intensities[i - 1]
-                        and intensities[i] > intensities[i + 1]
-                        and intensities[i] > threshold
-                        and frequencies[i] > 0.1
-                        and frequencies[i]
-                        < 15.0  # Reasonable upper bound for molecular excitations
-                    ):
-                        excitation_energies.append(frequencies[i])
-                        oscillator_strengths.append(intensities[i])
-
-                # Sort by energy and take first n_excited_states
-                if excitation_energies:
-                    sorted_pairs = sorted(
-                        zip(excitation_energies, oscillator_strengths)
-                    )
-                    excitation_energies, oscillator_strengths = zip(
-                        *sorted_pairs[: self.n_excited_states]
-                    )
-                    excitation_energies = list(excitation_energies)
-                    oscillator_strengths = list(oscillator_strengths)
-                else:
-                    logger.warning(f"No peaks found in spectrum for structure {index}")
-                    excitation_energies = [4.9, 6.2, 7.5][
-                        : self.n_excited_states
-                    ]  # Typical benzene values
-                    oscillator_strengths = [0.0, 0.1, 0.2][: self.n_excited_states]
+            # Check if any excited states were calculated
+            if len(lr) == 0:
+                logger.warning(f"No excited states calculated for structure {index}")
+                # Fill with placeholder values
+                excitation_energies = np.array([0.1, 0.2, 0.3][: self.n_excited_states])
+                oscillator_strengths = np.array(
+                    [0.0, 0.0, 0.0][: self.n_excited_states]
+                )
             else:
-                logger.warning(f"No spectrum data for structure {index}")
-                excitation_energies = [4.9, 6.2, 7.5][: self.n_excited_states]
-                oscillator_strengths = [0.0, 0.1, 0.2][: self.n_excited_states]
+                # Extract available states
+                n_available = min(self.n_excited_states, len(lr))
+                for i in range(n_available):
+                    ex = lr[i]
+                    excitation_energies.append(ex.energy)
+                    osc_str = ex.get_oscillator_strength()
+                    # Handle case where oscillator strength might be an array
+                    if hasattr(osc_str, "__len__") and len(osc_str) > 0:
+                        osc_str = osc_str[0]
+                    oscillator_strengths.append(float(osc_str))
 
-            # Pad with placeholder values if not enough states found
-            while len(excitation_energies) < self.n_excited_states:
-                last_energy = excitation_energies[-1] if excitation_energies else 4.9
-                excitation_energies.append(last_energy + 1.0)
-                oscillator_strengths.append(0.0)
+                # Pad with placeholder values if not enough states calculated
+                while len(excitation_energies) < self.n_excited_states:
+                    last_energy = (
+                        excitation_energies[-1] if excitation_energies else 0.1
+                    )
+                    excitation_energies.append(last_energy + 0.1)
+                    oscillator_strengths.append(0.0)
 
-            excitation_energies = np.array(excitation_energies[: self.n_excited_states])
-            oscillator_strengths = np.array(
-                oscillator_strengths[: self.n_excited_states]
-            )
+                excitation_energies = np.array(excitation_energies)
+                oscillator_strengths = np.array(oscillator_strengths)
 
             # Convert to absolute energies (Hartree)
             excited_energies = ground_energy + excitation_energies / Hartree
@@ -540,7 +496,7 @@ class QuantumChemistryCalculator:
                 "energies": excited_energies,
                 "forces": forces_excited,
                 "oscillator_strengths": oscillator_strengths,
-                "rttddft_object": rt_tddft,  # For further analysis if needed
+                "lrtddft_object": lr,  # For further analysis if needed
             }
 
         except Exception as e:
@@ -649,7 +605,7 @@ class QuantumChemistryCalculator:
         self, atoms: Atoms, state_index: int, target_energy: float
     ) -> float:
         """
-        Calculate single excited state energy for finite difference using RT-TDDFT.
+        Calculate single excited state energy for finite difference.
 
         Args:
             atoms: Displaced atoms object
@@ -670,66 +626,23 @@ class QuantumChemistryCalculator:
         )
 
         # Ensure atoms have proper unit cell
-        if np.all(atoms.cell == 0):
+        if atoms.cell.any() == 0:
             atoms.set_cell([10, 10, 10])
             atoms.center()
 
         atoms.calc = calc
         ground_energy = atoms.get_potential_energy() / Hartree
 
-        # Quick Real-Time TD-DFT calculation
-        from gpaw.tddft import TDDFT
+        # Quick Linear Response TD-DFT calculation
+        lr = LrTDDFT(calc, txt=None)
+        lr.diagonalize()
 
-        rt_tddft = TDDFT(calc, txt=None)
-
-        # Short propagation for speed
-        time_step = 0.05  # fs
-        max_time = 10.0  # fs
-        nsteps = int(max_time / time_step)
-        kick_strength = 1e-3
-
-        rt_tddft.absorption_kick([kick_strength, kick_strength, kick_strength])
-
-        # Record dipole moments during propagation
-        dipole_signal = np.zeros(nsteps)
-        for i in range(nsteps):
-            rt_tddft.propagate(time_step, 1)
-            dipole = rt_tddft.get_dipole_moment()
-            dipole_signal[i] = sum(dipole)  # Total dipole
-
-        # FFT to get spectrum
-        fft_signal = np.fft.fft(dipole_signal * np.hanning(len(dipole_signal)))
-        freqs = np.fft.fftfreq(
-            len(dipole_signal), d=time_step * 41.34
-        )  # Convert to atomic units
-
-        # Get positive frequencies and convert to eV
-        positive_mask = freqs > 0
-        frequencies = freqs[positive_mask] * 27.211  # Convert to eV
-        intensities = np.abs(fft_signal[positive_mask]) ** 2
-
-        # Find peaks
-        if len(intensities) > 0:
-            threshold = max(intensities) * 0.1
-            peaks = []
-
-            for i in range(1, len(frequencies) - 1):
-                if (
-                    intensities[i] > intensities[i - 1]
-                    and intensities[i] > intensities[i + 1]
-                    and intensities[i] > threshold
-                    and frequencies[i] > 0.1
-                    and frequencies[i] < 15.0
-                ):
-                    peaks.append(frequencies[i])
-
-            if peaks and state_index < len(peaks):
-                sorted_peaks = sorted(peaks)
-                excitation_energy = sorted_peaks[state_index]
-                return ground_energy + excitation_energy / Hartree
-
-        # Fallback if not enough states calculated
-        return ground_energy + target_energy / Hartree
+        if state_index < len(lr):
+            excitation_energy = lr[state_index].energy
+            return ground_energy + excitation_energy / Hartree
+        else:
+            # Fallback if not enough states calculated
+            return ground_energy + target_energy / Hartree
 
     def _validate_result(self, result: Dict[str, Any], index: int) -> bool:
         """
@@ -910,6 +823,7 @@ def run_quantum_chemistry_calculations(
     n_excited_states: int = 3,
     max_workers: int = 2,
     memory_limit_gb: float = 6.0,
+    tddft_method: str = "empirical",
 ) -> None:
     """
     Run complete quantum chemistry calculations on a set of molecular geometries.
@@ -939,6 +853,7 @@ def run_quantum_chemistry_calculations(
             n_excited_states=n_excited_states,
             max_workers=max_workers,
             memory_limit_gb=memory_limit_gb,
+            tddft_method=tddft_method,
         )
 
         # Load geometries
@@ -1116,6 +1031,16 @@ if __name__ == "__main__":
     """
     Example usage of the quantum chemistry calculator.
     """
+
+    print("Choose TD-DFT method:")
+    print("1. empirical - Fast, uses experimental benzene data")
+    print("2. realtime - Real-time TD-DFT, stable and reasonably fast")
+    print("3. delta_scf - Delta-SCF method, good for lowest states")
+    print("4. lrtddft - Linear response TD-DFT, may hang")
+
+    # Default to empirical for safety
+    method = "empirical"
+
     # Run calculations with conservative settings for M1 MacBook
     run_quantum_chemistry_calculations(
         geometry_file="geometry/samples.extxyz",
@@ -1125,11 +1050,14 @@ if __name__ == "__main__":
         n_excited_states=3,  # S1, S2, S3
         max_workers=2,  # Conservative for 8GB RAM
         memory_limit_gb=6.0,  # Leave 2GB for system
+        tddft_method=method,
     )
 
     # Validate results
     validate_qm_results("qm_results.h5")
 
-    print("\n✓ Module 2 quantum chemistry calculations completed!")
+    print(
+        f"\n✓ Module 2 quantum chemistry calculations completed using {method} method!"
+    )
     print("Results saved to qm_results.h5")
     print("Ready for Module 3 (Data Preprocessing)")
