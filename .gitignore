@@ -1,1 +1,4 @@
-benzene/scf_calc/results.npz
+*.dat
+*.txt
+*.xyz
+*.extxyz
