@@ -23,13 +23,13 @@ def load_hdf5(filename):
 
     return data_dict
 
-def remove_outliers(data, threshold=3.0):
+def remove_outliers(data_dict, threshold=3.0):
     """
     Removes outliers from a dictionary of NumPy arrays based on a z-score threshold of the excited and ground energies.
     """
     # Extract ground and excited state energies
-    energies_ground = data["energies_ground"]
-    energies_excited = data["energies_excited"]
+    energies_ground = data_dict["energies_ground"]
+    energies_excited = data_dict["energies_excited"]
 
     # Calculate z-scores for ground state energies
     ground_mean = np.mean(energies_ground)
@@ -56,7 +56,7 @@ def remove_outliers(data, threshold=3.0):
 
     # Apply mask to all arrays in the data dictionary
     filtered_data = {}
-    for key, array in data.items():
+    for key, array in data_dict.items():
         if isinstance(array, np.ndarray) and len(array) == len(valid_mask):
             # Apply mask to arrays that have the same length as the number of structures
             filtered_data[key] = array[valid_mask]
@@ -66,8 +66,72 @@ def remove_outliers(data, threshold=3.0):
 
     return filtered_data
 
-# Example Usage:
-file_path = "/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/benzene/qm_results.h5"
-all_data = load_hdf5(file_path)
+def normalize_energies(data_dict):
+    """
+    Normalize ground state energies and excited state energies through shifting the minimum to 0
+    """
+    
+    # Extract ground and excited state energies
+    energies_ground = data_dict["energies_ground"]
+    energies_excited = data_dict["energies_excited"]
+    
+    # normalize ground state energies
+    min_ground = np.min(energies_ground, axis=0)
+    energies_ground = energies_ground - min_ground
+    
+    # normalize excited state energies
+    min_excited = np.min(energies_excited, axis=0)
+    energies_excited = energies_excited - min_excited
+    
+    data_dict["energies_ground"] = energies_ground
+    data_dict["energies_excited"] = energies_excited
+    
+    return data_dict
 
-print(all_data.keys())
+def normalize_forces(data_dict):
+    """
+    Normalize the Numpy array of forces_ground and forces_excited from the data_dict using z-score
+    """
+    
+    # Function to normalize all forces
+    def normalize_force(forces):
+        mean_force = np.mean(forces, axis=0)
+        std_force = np.std(forces, axis=0)
+        return(forces - mean_force) / std_force
+           
+    # Normalize forces_ground and forces_excited 
+    data_dict["forces_ground"] = normalize_force(data_dict["forces_ground"])
+    data_dict["forces_excited"] = normalize_force(data_dict["forces_excited"])
+
+    return data_dict
+
+def normalize_couplings(data_dict):
+    """
+    Normalize the Numpy array of couplings from the data_dict using typical magnitudes (median)
+    """
+    
+    couplings = data_dict["couplings_nacv"]
+    
+    nonzero_mask = np.abs(couplings) > 1e-10
+    if np.any(nonzero_mask):
+        coupling_scale = np.median(np.abs(couplings[nonzero_mask]))
+    else:
+        coupling_scale = 1.0  # fallback
+    
+    # Scale by typical magnitude
+    data_dict["couplings_nacv"] = couplings / coupling_scale, coupling_scale
+
+    return data_dict
+
+if __name__ == "__main__":
+    file_path = "/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/benzene/qm_results.h5"
+    data_dict = normalize_couplings(
+        normalize_forces(
+            normalize_energies(
+                remove_outliers(
+                    load_hdf5(file_path)
+                )
+            )
+        )
+    )
+    print(data_dict.keys())
