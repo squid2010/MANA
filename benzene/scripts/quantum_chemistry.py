@@ -1030,7 +1030,7 @@ class QuantumChemistryCalculator:
 
 def run_quantum_chemistry_calculations(
     geometry_file: str = "geometry/samples.extxyz",
-    output_file: str = "qm_results.h5",
+    output_file: str = "dataset_construction/qm_results.h5",
     basis: str = "dzp",
     functional: str = "PBE",
     n_excited_states: int = 3,
