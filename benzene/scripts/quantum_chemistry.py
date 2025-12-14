@@ -1280,7 +1280,7 @@ if __name__ == "__main__":
     # Run calculations with conservative settings for M1 MacBook
     run_quantum_chemistry_calculations(
         geometry_file="geometry/samples.extxyz",
-        output_file="qm_results.h5",
+        output_file="/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/benzene/dataset_construction/qm_results.h5",
         basis="dzp",  # Standard basis set
         functional="PBE",  # PBE functional
         n_excited_states=3,  # S1, S2, S3
@@ -1290,7 +1290,7 @@ if __name__ == "__main__":
     )
 
     # Validate results
-    validate_qm_results("dataset_constructoin/qm_results.h5")
+    validate_qm_results("/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/benzene/dataset_construction/qm_results.h5")
 
     print(
         f"\n✓ Module 2 quantum chemistry calculations completed using {method} method!"
