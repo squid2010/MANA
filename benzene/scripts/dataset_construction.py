@@ -404,7 +404,7 @@ if __name__ == "__main__":
     # Create dataset with DataLoader functionality
     dataset = DatasetConstructor(
         file_path,
-        cutoff_radius=None,  # Full connectivity for benzene
+        cutoff_radius=5,
         batch_size=16,
         train_split=0.8,
         val_split=0.1,

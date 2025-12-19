@@ -255,7 +255,7 @@ def generate_mixed_displacements(mol, vib_modes, num_samples=200):
     return mols
 
 
-def generate_sample_file(mols, path="geometry/samples.extxyz"):
+def generate_sample_file(mols, path="/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/benzene/geometry"):
     """Generate multi-frame file showing all molecules."""
 
     dir, _ = os.path.split(path)
@@ -273,7 +273,7 @@ def generate_samples(
     min_dist=0.6,
     max_dist=3.0,
     rmsd_min=0.005,
-    path="geometry/samples.extxyz",
+    path="/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/benzene/geometry",
 ):
     mol = generate_geometry()
     vib_data = get_vibration_data(mol)
