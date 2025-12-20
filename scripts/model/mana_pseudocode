@@ -1,0 +1,183 @@
+# ============================================================
+# MANA: Equivariant Neural Network for Excited-State Chemistry
+# With Triplet + Transition Dipole Heads
+# ============================================================
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_scatter import scatter_sum
+
+
+# ------------------------------------------------------------
+# Radial Basis Expansion
+# ------------------------------------------------------------
+
+class RadialBasis(nn.Module):
+    def __init__(self, num_rbf, r_max=5.0):
+        super().__init__()
+        self.centers = nn.Parameter(torch.linspace(0.0, r_max, num_rbf))
+        self.widths = nn.Parameter(torch.ones(num_rbf))
+
+    def forward(self, r):
+        diff = r.unsqueeze(-1) - self.centers
+        return torch.exp(-self.widths * diff ** 2)
+
+
+# ------------------------------------------------------------
+# PaiNN Message Passing Layer
+# ------------------------------------------------------------
+
+class PaiNNLayer(nn.Module):
+    def __init__(self, hidden_dim, num_rbf):
+        super().__init__()
+
+        self.filter_net = nn.Sequential(
+            nn.Linear(num_rbf, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 2 * hidden_dim)
+        )
+
+        self.update_net = nn.Sequential(
+            nn.Linear(3 * hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 3 * hidden_dim)
+        )
+
+    def forward(self, s, v, edge_index, edge_attr, rbf):
+        """
+        s: (N, F)
+        v: (N, F, 3)
+        edge_attr: (E, 4) = [r, r_hat_x, r_hat_y, r_hat_z]
+        """
+
+        i, j = edge_index
+        uij = edge_attr[:, 1:4]
+
+        # filters
+        filt = self.filter_net(rbf)
+        f_s, f_v = filt.chunk(2, dim=-1)
+
+        # messages
+        m_s = f_s * s[j]
+        m_v = (
+            f_v.unsqueeze(-1) * v[j]
+            + (f_v * s[j]).unsqueeze(-1) * uij.unsqueeze(1)
+        )
+
+        # aggregate
+        m_s = scatter_sum(m_s, i, dim=0, dim_size=s.size(0))
+        m_v = scatter_sum(m_v, i, dim=0, dim_size=v.size(0))
+
+        # equivariant update
+        v_norm = torch.norm(m_v, dim=-1)
+        update_in = torch.cat([s, m_s, v_norm], dim=-1)
+
+        delta_s, alpha, beta = self.update_net(update_in).chunk(3, dim=-1)
+
+        s = s + delta_s
+        v = alpha.unsqueeze(-1) * v + beta.unsqueeze(-1) * m_v
+
+        return s, v
+
+
+# ------------------------------------------------------------
+# Transition Dipole Head (Equivariant)
+# ------------------------------------------------------------
+
+class DipoleHead(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.linear = nn.Linear(hidden_dim, 1, bias=False)
+
+    def forward(self, v, batch):
+        # v: (N, F, 3)
+        w = self.linear.weight.squeeze(0)
+        mu_atom = torch.einsum("nfk,f->nk", v, w)
+        mu = scatter_sum(mu_atom, batch, dim=0)
+        return mu
+
+
+# ------------------------------------------------------------
+# Full MANA Model
+# ------------------------------------------------------------
+
+class MANA(nn.Module):
+    def __init__(self,
+                 num_atom_types,
+                 num_singlet_states,
+                 hidden_dim=128,
+                 num_layers=4,
+                 num_rbf=20):
+        super().__init__()
+
+        self.embedding = nn.Embedding(num_atom_types, hidden_dim)
+        self.rbf = RadialBasis(num_rbf)
+
+        self.layers = nn.ModuleList([
+            PaiNNLayer(hidden_dim, num_rbf)
+            for _ in range(num_layers)
+        ])
+
+        # +1 state = T1
+        self.energy_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, num_singlet_states + 1)
+        )
+
+        self.dipole_head = DipoleHead(hidden_dim)
+
+    def forward(self, data):
+        z = data.x.long()
+        edge_index = data.edge_index
+        edge_attr = data.edge_attr
+        batch = data.batch
+
+        r = edge_attr[:, 0]
+        rbf = self.rbf(r)
+
+        s = self.embedding(z)
+        v = torch.zeros(s.size(0), s.size(1), 3, device=s.device)
+
+        for layer in self.layers:
+            s, v = layer(s, v, edge_index, edge_attr, rbf)
+
+        e_atom = self.energy_head(s)
+        energies = scatter_sum(e_atom, batch, dim=0)
+
+        mu = self.dipole_head(v, batch)
+
+        return energies, mu
+
+
+# ------------------------------------------------------------
+# Training Step
+# ------------------------------------------------------------
+
+def training_step(model, batch, optimizer,
+                  lambda_dipole=0.1,
+                  lambda_force=0.1):
+
+    batch.pos.requires_grad_(True)
+
+    energies, mu = model(batch)
+
+    loss_E = F.mse_loss(energies, batch.energies)
+
+    loss_mu = 0.0
+    if hasattr(batch, "transition_dipole"):
+        loss_mu = F.mse_loss(mu, batch.transition_dipole)
+
+    # forces from ground state only
+    E0 = energies[:, 0].sum()
+    forces = -torch.autograd.grad(E0, batch.pos, create_graph=True)[0]
+    loss_F = F.mse_loss(forces, batch.forces[0])
+
+    loss = loss_E + lambda_dipole * loss_mu + lambda_force * loss_F
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    return loss

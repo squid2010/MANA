@@ -399,7 +399,7 @@ class DatasetConstructor(Dataset):
 
 
 if __name__ == "__main__":
-    file_path = "/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/benzene/dataset_construction/qm_results.h5"
+    file_path = "/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/dataset_construction/qm_results.h5"
 
     # Create dataset with DataLoader functionality
     dataset = DatasetConstructor(
@@ -422,7 +422,7 @@ if __name__ == "__main__":
 
     # Save normalization parameters
     dataset.save_normalization_params(
-        "/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/benzene/dataset_construction/normalization_params.json"
+        "/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/dataset_construction/normalization_params.json"
     )
 
     # Test iteration through DataLoader
