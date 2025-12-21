@@ -1,9 +1,24 @@
 import h5py
 import numpy as np
 import torch
-from torch.utils.data import Subset
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
+
+
+class GeometricSubset:
+    """
+    Custom subset wrapper for PyTorch Geometric datasets.
+    """
+
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
 
 
 class DatasetConstructor(Dataset):
@@ -232,7 +247,7 @@ class DatasetConstructor(Dataset):
         """
         Create a subset dataset with specific indices.
         """
-        subset = Subset(self, indices)
+        subset = GeometricSubset(self, indices)
         return subset
 
     def get_dataloaders(self, num_workers=0):
@@ -252,7 +267,7 @@ class DatasetConstructor(Dataset):
 
         # Create DataLoaders
         train_loader = DataLoader(
-            train_dataset,
+            train_dataset,  # type: ignore
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=num_workers,
@@ -260,7 +275,7 @@ class DatasetConstructor(Dataset):
         )
 
         val_loader = DataLoader(
-            val_dataset,
+            val_dataset,  # type: ignore
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=num_workers,
@@ -268,7 +283,7 @@ class DatasetConstructor(Dataset):
         )
 
         test_loader = DataLoader(
-            test_dataset,
+            test_dataset,  # type: ignore
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=num_workers,
@@ -433,3 +448,5 @@ if __name__ == "__main__":
         )
         if batch_idx >= 2:  # Just test first few batches
             break
+
+    print("Dataset construction test completed successfully!")

@@ -6,6 +6,8 @@
 [Geometry Generation] → [Quantum Chemistry] → [Data Processing] → [ML Training] → [Validation] → [Dynamics]
 ```
 
+## Conda environment
+conda activate MANA
 ---
 
 ## MODULE 1: Geometry Generation Engine
