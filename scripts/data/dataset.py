@@ -58,6 +58,17 @@ class DatasetConstructor(Dataset):
         # Data stuff
         data_dict = self._load_hdf5(hdf5_file)
         self.atomic_numbers = np.array(data_dict["atomic_numbers"])
+
+        # Create atomic number to index mapping
+        self.unique_atoms = sorted(set(self.atomic_numbers))
+        self.atom_to_index = {atom: idx for idx, atom in enumerate(self.unique_atoms)}
+        self.num_atom_types = len(self.unique_atoms)
+
+        # Map atomic numbers to indices
+        self.atomic_indices = np.array(
+            [self.atom_to_index[atom] for atom in self.atomic_numbers]
+        )
+
         self.couplings = np.array(data_dict["couplings_nacv"])
         self.energies_ground = np.array(data_dict["energies_ground"])
         self.energies_excited = np.array(data_dict["energies_excited"])
@@ -331,7 +342,7 @@ class DatasetConstructor(Dataset):
         pos = torch.tensor(
             self.positions[idx], dtype=torch.float
         )  # Shape: (n_atoms, 3)
-        z = torch.tensor(self.atomic_numbers, dtype=torch.long)  # Shape: (n_atoms,)
+        z = torch.tensor(self.atomic_indices, dtype=torch.long)  # Shape: (n_atoms,)
 
         # Create edges based on cutoff
         edge_index, edge_attr = self._create_edges(pos)

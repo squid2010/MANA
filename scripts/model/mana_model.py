@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch_scatter import scatter_sum
 
 
@@ -279,60 +278,3 @@ class MANA(nn.Module):
         )  # Shape: (num_molecules, num_coupling_pairs, 3)
 
         return energies, dipoles, nac
-
-
-def training_step(
-    model, batch, optimizer, lambda_dipole=0.1, lambda_force=0.1, lambda_nac=0.1
-):
-    """
-    Training step for the MANA model.
-    model: MANA model instance.
-    batch: A batch of molecular graphs with attributes:
-        - pos: Atomic positions (num_atoms, 3)
-        - energies: Reference energies (num_molecules, num_singlet_states + 1)
-        - forces: Reference forces (num_atoms, 3)
-        - transition_dipoles: (optional) Reference transition dipole moments (num_molecules, 3)
-        - nac: (optional) Reference non-adiabatic couplings (num_molecules, num_coupling_pairs, 3)
-    optimizer: Optimizer for updating model parameters.
-    lambda_dipole: Weight for the dipole loss term.
-    lambda_force: Weight for the force loss term.
-    lambda_nac: Weight for the non-adiabatic coupling loss term.
-    Returns:
-        - loss: Computed loss value.
-    """
-    batch.pos.requires_grad_(True)
-
-    energies, mu, nac = model(batch)
-
-    loss_E = F.mse_loss(energies, batch.energies)
-
-    loss_mu = 0.0
-    if hasattr(batch, "transition_dipoles"):
-        loss_mu = F.mse_loss(mu, batch.transition_dipoles)
-
-    loss_nac = 0.0
-    if hasattr(batch, "nac"):
-        loss_nac = F.mse_loss(nac, batch.nac)
-
-    # Forces from ground state only
-    E0 = energies[:, 0].sum()
-    grad_outputs = torch.autograd.grad(
-        E0, batch.pos, create_graph=True, allow_unused=True
-    )[0]
-
-    if grad_outputs is not None:
-        forces = -grad_outputs
-        loss_F = F.mse_loss(forces, batch.forces)
-    else:
-        # If gradients are not available (e.g., pos not in computation graph), skip force loss
-        loss_F = torch.tensor(0.0, device=energies.device, requires_grad=True)
-
-    loss = (
-        loss_E + lambda_dipole * loss_mu + lambda_force * loss_F + lambda_nac * loss_nac
-    )
-
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    return loss
