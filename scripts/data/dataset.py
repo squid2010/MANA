@@ -151,16 +151,34 @@ class DatasetConstructor(Dataset):
 
     def _normalize_energies(self):
         """
-        Normalize ground state energies and excited state energies through shifting the minimum to 0
+        Normalize energies while preserving physical relationships.
+        All energies are shifted by the minimum ground state energy,
+        so ground state energies start from 0 and excitation energies are preserved.
         """
+        # Find global minimum ground state energy across all structures
+        min_ground_energy = np.min(self.energies_ground)
 
-        # normalize ground state energies
-        min_ground = np.min(self.energies_ground, axis=0)
-        self.energies_ground -= min_ground
+        # Shift both ground and excited energies by the same amount
+        # This preserves excitation energies = excited - ground
+        self.energies_ground = self.energies_ground - min_ground_energy
+        self.energies_excited = self.energies_excited - min_ground_energy
 
-        # normalize excited state energies
-        min_excited = np.min(self.energies_excited, axis=0)
-        self.energies_excited -= min_excited
+        # Verify that ground state energies are now >= 0
+        assert np.min(self.energies_ground) >= -1e-10, (
+            "Ground state energies should be >= 0"
+        )
+
+        # Store the shift for potential later use
+        self.energy_shift = min_ground_energy
+
+        print(f"Energy normalization applied:")
+        print(f"  Shift: {min_ground_energy:.6f} Hartree")
+        print(
+            f"  Ground state range: [{self.energies_ground.min():.6f}, {self.energies_ground.max():.6f}]"
+        )
+        print(
+            f"  Excited state range: [{self.energies_excited.min():.6f}, {self.energies_excited.max():.6f}]"
+        )
 
     def _normalize_forces(self):
         """

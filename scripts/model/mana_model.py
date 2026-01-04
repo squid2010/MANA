@@ -127,13 +127,17 @@ class EnergyHead(nn.Module):
     Head to predict energy for a single electronic state.
     """
 
-    def __init__(self, hidden_dim):
+    def __init__(self, hidden_dim, dropout=0.1):
         """
         hidden_dim: Dimension of the hidden features.
+        dropout: Dropout rate for regularization.
         """
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, s, batch):
@@ -223,7 +227,7 @@ class MANA(nn.Module):
 
         # Separate energy heads for each state (+1 state = T1)
         self.energy_heads = nn.ModuleList(
-            [EnergyHead(hidden_dim) for _ in range(num_singlet_states + 1)]
+            [EnergyHead(hidden_dim, dropout=0.1) for _ in range(num_singlet_states + 1)]
         )
 
         self.dipole_head = DipoleHead(hidden_dim)
@@ -234,6 +238,43 @@ class MANA(nn.Module):
         num_coupling_pairs = num_singlet_states
         self.nac_head = NonAdiabaticCouplingHead(hidden_dim, num_coupling_pairs)
 
+        # Initialize weights properly
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize model weights with appropriate scaling"""
+        # Initialize embedding with small values
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=0.1)
+
+        # Initialize energy heads with smaller weights to prevent large initial predictions
+        for energy_head in self.energy_heads:
+            for layer in energy_head.net:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight, gain=0.1)
+                    if layer.bias is not None:
+                        nn.init.constant_(layer.bias, 0.0)
+
+        # Initialize dipole head
+        if hasattr(self.dipole_head, "linear"):
+            nn.init.xavier_uniform_(self.dipole_head.linear.weight, gain=0.1)
+
+        # Initialize NAC head
+        for net in self.nac_head.coupling_nets:
+            for layer in net:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight, gain=0.1)
+                    if layer.bias is not None:
+                        nn.init.constant_(layer.bias, 0.0)
+
+        # Initialize PaiNN layers
+        for layer in self.layers:
+            for module in [layer.filter_net, layer.update_net]:
+                for sublayer in module:
+                    if isinstance(sublayer, nn.Linear):
+                        nn.init.xavier_uniform_(sublayer.weight, gain=0.1)
+                        if sublayer.bias is not None:
+                            nn.init.constant_(sublayer.bias, 0.0)
+
     def forward(self, data):
         """
         Defines the forward pass of the MANA
@@ -242,6 +283,7 @@ class MANA(nn.Module):
             - edge_index: Edge indices (2, num_edges)
             - edge_attr: Edge attributes (num_edges, 4) = (distance, direction_x, direction_y, direction_z)
             - batch: Batch indices for atoms (num_atoms,)
+            - pos: Atomic positions (num_atoms, 3) - needed for gradient computation
         Returns:
             - energies: Predicted energies (num_molecules, num_singlet_states + 1)
             - dipoles: Predicted dipole moments (num_molecules, 3)
@@ -249,11 +291,25 @@ class MANA(nn.Module):
         """
         z = data.x.long()  # Atomic numbers
         edge_index = data.edge_index
-        edge_attr = data.edge_attr  # (distance, direction_x, direction_y, direction_z)
+        pos = data.pos  # Positions - important for gradient flow
         batch = data.batch
         batch_size = data.batch.max().item() + 1
 
-        r = edge_attr[:, 0]  # Distances
+        # Recompute edge attributes to maintain gradient connection
+        if edge_index.size(1) > 0:
+            row, col = edge_index
+            diff = pos[col] - pos[row]  # Displacement vectors with gradients
+            distances = torch.norm(diff, dim=1, keepdim=True)  # Distances
+            unit_vectors = diff / (distances + 1e-8)  # Unit direction vectors
+            edge_attr = torch.cat([distances, unit_vectors], dim=1)
+        else:
+            edge_attr = torch.empty((0, 4), dtype=pos.dtype, device=pos.device)
+
+        r = (
+            distances.squeeze(-1)
+            if edge_index.size(1) > 0
+            else torch.empty(0, device=pos.device)
+        )
         rbf = self.rbf(r)
 
         s = self.embedding(z)  # Scalar features
