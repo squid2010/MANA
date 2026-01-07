@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_scatter import scatter_sum
 
 
@@ -16,10 +17,9 @@ class RadialBasisFunction(nn.Module):
         """
 
         super().__init__()
-        self.centers = nn.Parameter(
-            torch.linspace(0, cutoff, num_rbf), requires_grad=False
-        )
-        self.widths = nn.Parameter(torch.ones(num_rbf), requires_grad=False)
+        centers = torch.linspace(0.0, cutoff, num_rbf)
+        self.register_buffer("centers", centers)
+        self.gamma = nn.Parameter(torch.ones(num_rbf), requires_grad=False)
 
     def forward(self, distances):
         """
@@ -29,8 +29,7 @@ class RadialBasisFunction(nn.Module):
         """
 
         diff = distances.unsqueeze(-1) - self.centers
-        rbf = torch.exp(-(diff**2) / (2 * self.widths**2))
-        return rbf
+        return torch.exp(-self.gamma * diff**2)
 
 
 class PaiNNLayer(nn.Module):
@@ -46,10 +45,11 @@ class PaiNNLayer(nn.Module):
         """
 
         super().__init__()
+
         self.filter_net = nn.Sequential(
             nn.Linear(num_rbf, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 2 * hidden_dim),
+            nn.Linear(hidden_dim, 3 * hidden_dim),
         )
 
         self.update_net = nn.Sequential(
@@ -60,40 +60,35 @@ class PaiNNLayer(nn.Module):
 
     def forward(self, s, v, edge_index, edge_attr, rbf):
         """
-        Defines the forward pass of the PaiNN layer.
-        s: Scalar features of shape (num_atoms, hidden_dim)
-        v: Vector features of shape (num_atoms, hidden_dim, 3)
-        edge_index: Edge indices of shape (2, num_edges)
-        edge_attr: Edge attributes of shape (num_edges, 4) = (distance, direction_x, direction_y, direction_z)
-        rbf: Radial basis functions of shape (num_edges, num_rbf)
-        Returns: Updated scalar and vector features.
+        PaiNN message passing with strict E(3)-equivariance.
+
+        s: (N, F) scalar features
+        v: (N, F, 3) vector features
+        edge_index: (2, E)
+        edge_attr: (E, 4) = (distance, dx, dy, dz)
+        rbf: (E, num_rbf)
         """
 
         row, col = edge_index
-        unit_direction_vectors = edge_attr[:, 1:4]  # Direction vectors
+        directions = edge_attr[:, 1:4]  # (E, 3)
 
-        # Filters
-        filter = self.filter_net(rbf)
-        filter_s, filter_v = filter.chunk(2, dim=-1)
+        phi_ss, phi_vv, phi_sv = self.filter_net(rbf).chunk(3, dim=-1)
 
-        # Messages
-        message_s = filter_s * s[col]
-        message_v = filter_v.unsqueeze(-1) * v[col] + filter_v.unsqueeze(-1) * s[
-            col
-        ].unsqueeze(-1) * unit_direction_vectors.unsqueeze(1)
+        m_s = phi_ss * s[col]
+        m_v = phi_vv.unsqueeze(-1) * v[col] + phi_sv.unsqueeze(
+            -1
+        ) * directions.unsqueeze(1) * s[col].unsqueeze(-1)
 
-        # Aggregate
-        message_s = scatter_sum(message_s, row, dim=0, dim_size=s.size(0))
-        message_v = scatter_sum(message_v, row, dim=0, dim_size=v.size(0))
+        m_s = scatter_sum(m_s, row, dim=0, dim_size=s.size(0))
+        m_v = scatter_sum(m_v, row, dim=0, dim_size=v.size(0))
 
-        # equivariant update
-        v_norm = torch.norm(message_v, dim=-1)
-        update_in = torch.cat([s, message_s, v_norm], dim=-1)
-
-        delta_s, alpha, beta = self.update_net(update_in).chunk(3, dim=-1)
+        v_norm = torch.norm(m_v, dim=-1)
+        delta_s, alpha, beta = self.update_net(
+            torch.cat([s, m_s, v_norm], dim=-1)
+        ).chunk(3, dim=-1)
 
         s = s + delta_s
-        v = alpha.unsqueeze(-1) * v + beta.unsqueeze(-1) * message_v
+        v = alpha.unsqueeze(-1) * v + beta.unsqueeze(-1) * m_v
 
         return s, v
 
@@ -108,7 +103,7 @@ class DipoleHead(nn.Module):
         hidden_dim: Dimension of the hidden features.
         """
         super().__init__()
-        self.linear = nn.Linear(hidden_dim, 1, bias=False)
+        self.weight = nn.Parameter(torch.randn(hidden_dim))
 
     def forward(self, v, batch):
         """
@@ -116,10 +111,8 @@ class DipoleHead(nn.Module):
         batch: Tensor of shape (num_atoms,) indicating molecule indices.
         Returns: Tensor of shape (num_molecules, 3) containing predicted dipole moments.
         """
-        weights = self.linear.weight.squeeze(0)  # Shape: (hidden_dim,)
-        mu_atom = torch.einsum("nfk,f->nk", v, weights)  # Shape: (num_atoms, 3)
-        mu = scatter_sum(mu_atom, batch, dim=0)  # Shape: (num_molecules, 3)
-        return mu
+        mu_atom = torch.einsum("nfk,f->nk", v, self.weight)
+        return scatter_sum(mu_atom, batch, dim=0)
 
 
 class EnergyHead(nn.Module):
@@ -127,7 +120,7 @@ class EnergyHead(nn.Module):
     Head to predict energy for a single electronic state.
     """
 
-    def __init__(self, hidden_dim, dropout=0.1):
+    def __init__(self, hidden_dim):
         """
         hidden_dim: Dimension of the hidden features.
         dropout: Dropout rate for regularization.
@@ -136,7 +129,6 @@ class EnergyHead(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-            nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
         )
 
@@ -146,9 +138,7 @@ class EnergyHead(nn.Module):
         batch: Tensor of shape (num_atoms,) indicating molecule indices.
         Returns: Tensor of shape (num_molecules, 1) containing predicted energies.
         """
-        energies_atom = self.net(s)  # Shape: (num_atoms, 1)
-        energies = scatter_sum(energies_atom, batch, dim=0)  # Shape: (num_molecules, 1)
-        return energies
+        return scatter_sum(self.net(s), batch, dim=0)
 
 
 class NonAdiabaticCouplingHead(nn.Module):
@@ -156,22 +146,13 @@ class NonAdiabaticCouplingHead(nn.Module):
     Equivariant head to predict non-adiabatic coupling vectors between electronic states.
     """
 
-    def __init__(self, hidden_dim, num_coupling_pairs):
+    def __init__(self, hidden_dim, num_pairs):
         """
         hidden_dim: Dimension of the hidden features.
         num_coupling_pairs: Number of state pairs for coupling (e.g., 3 for S0-S1, S1-S2, S2-S3).
         """
         super().__init__()
-        self.coupling_nets = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.SiLU(),
-                    nn.Linear(hidden_dim, 1, bias=False),
-                )
-                for _ in range(num_coupling_pairs)
-            ]
-        )
+        self.weights = nn.Parameter(torch.randn(num_pairs, hidden_dim))
 
     def forward(self, v, batch, batch_size):
         """
@@ -181,41 +162,75 @@ class NonAdiabaticCouplingHead(nn.Module):
         Returns: Tensor of shape (num_molecules, num_coupling_pairs, 3) containing coupling vectors.
         """
         couplings = []
-        for net in self.coupling_nets:
-            # Get the last linear layer (index 2 in the Sequential)
-            last_layer = list(net.children())[-1]
-            weights = last_layer.weight.squeeze(0)  # Shape: (hidden_dim,)
-            coupling_atom = torch.einsum(
-                "nfk,f->nk", v, weights
-            )  # Shape: (num_atoms, 3)
-            coupling_mol = scatter_sum(
-                coupling_atom, batch, dim=0, dim_size=batch_size
-            )  # Shape: (num_molecules, 3)
-            couplings.append(coupling_mol)
+        for w in self.weights:
+            c_atom = torch.einsum("nfk,f->nk", v, w)
+            couplings.append(scatter_sum(c_atom, batch, dim=0, dim_size=batch_size))
+        return torch.stack(couplings, dim=1)
 
-        couplings = torch.stack(
-            couplings, dim=1
-        )  # Shape: (num_molecules, num_coupling_pairs, 3)
-        return couplings
+
+class AbsorptionHead(nn.Module):
+    """
+    Predicts absorption maximum (lambda_max) from excited state energy gaps
+    """
+
+    def __init__(self, num_states, hidden_dim=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(num_states - 1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, energies):
+        """
+        energies: (num_molecules, num_states)
+        returns: (num_molecules, 1) lambda_max
+        """
+        # Compute energy gaps relative to ground state
+        gaps = energies[:, 1:] - energies[:, :1]  # (num_molecules, num_states - 1)
+        lambda_max = self.net(gaps)  # (num_molecules, 1)
+        return lambda_max
+
+
+class SingletOxygenYieldHead(nn.Module):
+    """
+    Predicts a singlet oxygen yield from excited state energies + NAC magnitudes
+    """
+
+    def __init__(self, num_states, num_couplings, hidden_dim=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(num_states - 1 + num_couplings, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),  # Yield between 0 and 1
+        )
+
+    def forward(self, energies, nac):
+        """
+        energies: (num_molecules, num_states)
+        nac: (num_molecules, num_coupling_pairs, 3)
+        returns: (num_molecules, 1) singlet oxygen yield
+        """
+        # Energy gaps
+        gaps = energies[:, 1:] - energies[:, :1]  # (num_molecules, num_states - 1)
+
+        # NAC magnitudes
+        nac_mag = torch.norm(nac, dim=-1)  # (num_molecules, num_coupling_pairs)
+
+        # Concatenate features
+        return self.net(torch.cat([gaps, nac_mag], dim=1))
 
 
 class MANA(nn.Module):
     def __init__(
         self,
         num_atom_types,
-        num_singlet_states,
+        num_states,
         hidden_dim=128,
         num_layers=4,
         num_rbf=20,
     ):
-        """
-        MANA model for predicting molecular properties.
-        num_atom_types: Number of unique atom types.
-        num_singlet_states: Number of singlet states to consider.
-        hidden_dim: Dimension of the hidden features.
-        num_layers: Number of PaiNN layers.
-        num_rbf: Number of radial basis functions.
-        """
         super().__init__()
 
         self.embedding = nn.Embedding(num_atom_types, hidden_dim)
@@ -225,55 +240,23 @@ class MANA(nn.Module):
             [PaiNNLayer(hidden_dim, num_rbf) for _ in range(num_layers)]
         )
 
-        # Separate energy heads for each state (+1 state = T1)
         self.energy_heads = nn.ModuleList(
-            [EnergyHead(hidden_dim, dropout=0.1) for _ in range(num_singlet_states + 1)]
+            [EnergyHead(hidden_dim) for _ in range(num_states)]
         )
 
         self.dipole_head = DipoleHead(hidden_dim)
+        self.nac_head = NonAdiabaticCouplingHead(hidden_dim, num_states - 1)
+        self.absorption_head = AbsorptionHead(num_states)
+        self.yield_head = SingletOxygenYieldHead(num_states, num_states - 1)
 
-        # Non-adiabatic coupling head for state pairs
-        # For num_singlet_states = 3 (S0, S1, S2) + 1 triplet (T1) = 4 total states
-        # Coupling pairs: (S0-S1), (S1-S2), (S2-T1) = 3 pairs
-        num_coupling_pairs = num_singlet_states
-        self.nac_head = NonAdiabaticCouplingHead(hidden_dim, num_coupling_pairs)
-
-        # Initialize weights properly
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize model weights with appropriate scaling"""
-        # Initialize embedding with small values
-        nn.init.normal_(self.embedding.weight, mean=0.0, std=0.1)
-
-        # Initialize energy heads with smaller weights to prevent large initial predictions
-        for energy_head in self.energy_heads:
-            for layer in energy_head.net:
-                if isinstance(layer, nn.Linear):
-                    nn.init.xavier_uniform_(layer.weight, gain=0.1)
-                    if layer.bias is not None:
-                        nn.init.constant_(layer.bias, 0.0)
-
-        # Initialize dipole head
-        if hasattr(self.dipole_head, "linear"):
-            nn.init.xavier_uniform_(self.dipole_head.linear.weight, gain=0.1)
-
-        # Initialize NAC head
-        for net in self.nac_head.coupling_nets:
-            for layer in net:
-                if isinstance(layer, nn.Linear):
-                    nn.init.xavier_uniform_(layer.weight, gain=0.1)
-                    if layer.bias is not None:
-                        nn.init.constant_(layer.bias, 0.0)
-
-        # Initialize PaiNN layers
-        for layer in self.layers:
-            for module in [layer.filter_net, layer.update_net]:
-                for sublayer in module:
-                    if isinstance(sublayer, nn.Linear):
-                        nn.init.xavier_uniform_(sublayer.weight, gain=0.1)
-                        if sublayer.bias is not None:
-                            nn.init.constant_(sublayer.bias, 0.0)
+        for m in self.modules():
+            if isinstance(m, torch.nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
 
     def forward(self, data):
         """
@@ -288,49 +271,87 @@ class MANA(nn.Module):
             - energies: Predicted energies (num_molecules, num_singlet_states + 1)
             - dipoles: Predicted dipole moments (num_molecules, 3)
             - nac: Predicted non-adiabatic couplings (num_molecules, num_coupling_pairs, 3)
+            - lambda_max: Predicted absorption maximum (num_molecules, 1)
+            - phi: Predicted singlet oxygen yield (num_molecules, 1)
         """
-        z = data.x.long()  # Atomic numbers
-        edge_index = data.edge_index
-        pos = data.pos  # Positions - important for gradient flow
-        batch = data.batch
-        batch_size = data.batch.max().item() + 1
+        z, pos, edge_index, batch = data.x, data.pos, data.edge_index, data.batch
+        batch_size = batch.max().item() + 1
 
-        # Recompute edge attributes to maintain gradient connection
-        if edge_index.size(1) > 0:
-            row, col = edge_index
-            diff = pos[col] - pos[row]  # Displacement vectors with gradients
-            distances = torch.norm(diff, dim=1, keepdim=True)  # Distances
-            unit_vectors = diff / (distances + 1e-8)  # Unit direction vectors
-            edge_attr = torch.cat([distances, unit_vectors], dim=1)
-        else:
-            edge_attr = torch.empty((0, 4), dtype=pos.dtype, device=pos.device)
-
-        r = (
-            distances.squeeze(-1)
-            if edge_index.size(1) > 0
-            else torch.empty(0, device=pos.device)
+        row, col = edge_index
+        diff = pos[col] - pos[row]
+        dist = torch.norm(diff, dim=1)
+        edge_attr = torch.cat(
+            [dist.unsqueeze(-1), diff / (dist.unsqueeze(-1) + 1e-8)], dim=1
         )
-        rbf = self.rbf(r)
+        rbf = self.rbf(dist)
 
-        s = self.embedding(z)  # Scalar features
+        s = self.embedding(z)
         v = torch.zeros(s.size(0), s.size(1), 3, device=s.device)
 
         for layer in self.layers:
             s, v = layer(s, v, edge_index, edge_attr, rbf)
 
-        # Predict energies using separate heads for each state
-        energies = []
-        for energy_head in self.energy_heads:
-            energy = energy_head(s, batch)  # Shape: (num_molecules, 1)
-            energies.append(energy)
-        energies = torch.cat(
-            energies, dim=1
-        )  # Shape: (num_molecules, num_singlet_states + 1)
+        energies = torch.cat([h(s, batch) for h in self.energy_heads], dim=1)
+        dipoles = self.dipole_head(v, batch)
+        nac = self.nac_head(v, batch, batch_size)
+        lambda_max = self.absorption_head(energies)
+        phi = self.yield_head(energies, nac)
 
-        dipoles = self.dipole_head(v, batch)  # Shape: (num_molecules, 3)
+        return energies, dipoles, nac, lambda_max, phi
 
-        nac = self.nac_head(
-            v, batch, batch_size
-        )  # Shape: (num_molecules, num_coupling_pairs, 3)
+    def loss_fn(self, preds, batch, weights):
+        """
+        Defines the loss function for training.
+        preds: Tuple of model predictions (energies, dipoles, nac, lambda_max, phi)
+        batch: Batch of data with ground truth values.
+        weights: Dictionary of weights for each loss component.
+        Returns:
+            - total_loss: Weighted sum of individual losses.
+            - loss_E: Energy loss.
+            - loss_nac: NAC loss.
+            - loss_lambda: Absorption maximum loss.
+            - loss_phi: Singlet oxygen yield loss.
+        """
+        energies, dipoles, nac_pred, lambda_pred, phi_pred = preds
 
-        return energies, dipoles, nac
+        # --------------------------------------------------
+        # Energies
+        E0_pred = energies[:, 0]
+        Ei_pred = energies[:, 1:]
+
+        # Reshape ground truth energies which are flattened by DataLoader
+        if batch.energies.ndim == 1:
+            energies_true = batch.energies.view(energies.size(0), -1)
+        else:
+            energies_true = batch.energies
+
+        E0_true = energies_true[:, 0]
+        Ei_true = energies_true[:, 1:]
+        loss_E0 = F.mse_loss(E0_pred, E0_true)
+        loss_Ei = F.mse_loss(Ei_pred, Ei_true)
+        loss_E = loss_E0 + loss_Ei
+
+        # --------------------------------------------------
+        # NACs
+        nac_true_mag = torch.norm(batch.nac, dim=(-1, -2))
+        if nac_true_mag.ndim == 1:
+            nac_true_mag = nac_true_mag.view(energies.size(0), -1)
+
+        nac_pred_mag = torch.norm(nac_pred, dim=-1)  # (B, n_pairs)
+        loss_nac = F.mse_loss(nac_pred_mag, nac_true_mag)
+
+        # --------------------------------------------------
+        # Spectroscopic targets
+        loss_lambda = F.mse_loss(lambda_pred.squeeze(-1), batch.lambda_max)
+        loss_phi = F.mse_loss(phi_pred.squeeze(-1), batch.phi_delta)
+
+        # --------------------------------------------------
+        # Total loss
+        total_loss = (
+            loss_E
+            + weights["lambda"] * loss_lambda
+            + weights["phi"] * loss_phi
+            + weights["nac_reg"] * loss_nac
+        )
+
+        return total_loss, loss_E, loss_nac, loss_lambda, loss_phi
