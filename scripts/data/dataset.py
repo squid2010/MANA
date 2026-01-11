@@ -6,10 +6,6 @@ from torch_geometric.loader import DataLoader
 
 
 class GeometricSubset:
-    """
-    Custom subset wrapper for PyTorch Geometric datasets.
-    """
-
     def __init__(self, dataset, indices):
         self.dataset = dataset
         self.indices = indices
@@ -22,557 +18,115 @@ class GeometricSubset:
 
 
 class DatasetConstructor(Dataset):
-    def _load_hdf5(self, filename):
-        """
-        Recursively loads all datasets from an HDF5 file into a dictionary.
-        """
-        data_dict = {}
-
-        def recursively_load(hdf5_object, current_path, data_dict):
-            for key, item in hdf5_object.items():
-                new_path = f"{current_path}/{key}" if current_path else key
-                if isinstance(item, h5py.Dataset):
-                    # Load the dataset into a NumPy array in memory
-                    data_dict[new_path] = item[()]
-                elif isinstance(item, h5py.Group):
-                    # Recurse into the group
-                    recursively_load(item, new_path, data_dict)
-
-        with h5py.File(filename, "r") as f:
-            recursively_load(f, "", data_dict)
-
-        return data_dict
-
     def __init__(
         self,
         hdf5_file,
-        cutoff_radius=None,
-        transform=None,
+        cutoff_radius=5.0,
         batch_size=32,
         train_split=0.8,
         val_split=0.1,
         random_seed=42,
     ):
-        super().__init__(transform=transform)
+        super().__init__()
 
-        # Data stuff
-        data_dict = self._load_hdf5(hdf5_file)
-        self.atomic_numbers = np.array(
-            data_dict["atomic_numbers"]
-        )  # Shape: (n_molecules, max_atoms)
+        with h5py.File(hdf5_file, "r") as f:
+            self.atomic_numbers = f["atomic_numbers"][()] # pyright: ignore[reportIndexIssue]
+            self.positions = f["geometries"][()] # pyright: ignore[reportIndexIssue]
+            self.lambda_max = f["lambda_max"][()] # pyright: ignore[reportIndexIssue]
+            self.phi_delta = f["phi_delta"][()] # pyright: ignore[reportIndexIssue]
+            self.mol_ids = f["mol_ids"][()] # pyright: ignore[reportIndexIssue]
+            self.smiles = f["smiles"][()] # pyright: ignore[reportIndexIssue]
 
-        # Create atomic number to index mapping using all unique atoms across all molecules
-        unique_atoms_set = set()
-        for mol_atoms in self.atomic_numbers:
-            unique_atoms_set.update(mol_atoms[mol_atoms > 0])  # Exclude padding zeros
-        self.unique_atoms = sorted(unique_atoms_set)
-        self.atom_to_index = {atom: idx for idx, atom in enumerate(self.unique_atoms)}
+        unique_atoms = set()
+        for z in self.atomic_numbers: # pyright: ignore[reportGeneralTypeIssues]
+            unique_atoms.update(z[z > 0])
+
+        self.unique_atoms = sorted(unique_atoms)
+        self.atom_to_index = {a: i for i, a in enumerate(self.unique_atoms)}
         self.num_atom_types = len(self.unique_atoms)
 
-        # Atomic indices will be computed per molecule in get() method
-
-        self.couplings = np.array(data_dict["couplings_nacv"])
-        self.energies_ground = np.array(data_dict["energies_ground"])
-        self.energies_excited = np.array(data_dict["energies_excited"])
-        self.forces_ground = np.array(data_dict["forces_ground"])
-        self.forces_excited = np.array(data_dict["forces_excited"])
-        self.positions = np.array(data_dict["geometries"])
-        self.oscillator_strengths = np.array(
-            data_dict.get("oscillator_strengths", None)
-        )
-        self.lambda_max = np.array(data_dict.get("lambda_max", None))
-        self.phi_delta = np.array(data_dict.get("phi_delta", None))
-        self.mol_ids = data_dict.get("mol_ids", None)
-        self.smiles = data_dict.get("smiles", None)
-        self.metadata = np.array(data_dict.get("metadata", {}))
-
-        # Graph Stuff
         self.cutoff_radius = cutoff_radius
-
-        # Dataloader stuff
         self.batch_size = batch_size
-        self.train_split = train_split
-        self.val_split = val_split
-        self.random_seed = random_seed
 
-        # Preprocess the dataset
-        self.preprocess()
+        self.n_structures = self.atomic_numbers.shape[0] # pyright: ignore[reportAttributeAccessIssue]
 
-        # Update n_structures after preprocessing (outlier removal)
-        self.n_structures = len(self.positions)
+        np.random.seed(random_seed)
+        idx = np.random.permutation(self.n_structures)
 
-        # Create train/val/test splits
-        self._create_splits()
+        n_train = int(train_split * self.n_structures)
+        n_val = int(val_split * self.n_structures)
 
-        # Store normalization parameters
-        self._store_normalization_params()
+        self.train_indices = idx[:n_train]
+        self.val_indices = idx[n_train : n_train + n_val]
+        self.test_indices = idx[n_train + n_val :]
 
-    # Functions to preprocess the dataset
-    # 1. Remove outliers based on z-score thresholding
-    # 2. Normalize energies by shifting minimum to zero
-    # 3. Normalize forces using z-score normalization
-    # 4. Normalize couplings using typical magnitudes (median)
-    def _remove_outliers(self, threshold=3.0):
-        """
-        Removes outlier structures based on a z-score threshold of the excited and ground energies.
-        """
-        # Calculate z-scores for ground state energies
-        ground_mean = np.mean(self.energies_ground)
-        ground_std = np.std(self.energies_ground)
-        ground_z_scores = np.abs((self.energies_ground - ground_mean) / ground_std)
 
-        # Calculate z-scores for excited state energies
-        # Handle case where excited energies might be 2D (multiple excited states per structure)
-        if self.energies_excited.ndim > 1:
-            # Flatten to calculate overall statistics, then reshape z-scores
-            excited_flat = self.energies_excited.flatten()
-            excited_mean = np.mean(excited_flat)
-            excited_std = np.std(excited_flat)
-            excited_z_scores = np.abs(
-                (self.energies_excited - excited_mean) / excited_std
-            )
-            # Take max z-score across excited states for each structure
-            excited_z_scores_max = np.max(excited_z_scores, axis=1)
-        else:
-            excited_mean = np.mean(self.energies_excited)
-            excited_std = np.std(self.energies_excited)
-            excited_z_scores_max = np.abs(
-                (self.energies_excited - excited_mean) / excited_std
-            )
+    def get(self, idx):
+        z_raw = self.atomic_numbers[idx] # pyright: ignore[reportIndexIssue]
+        pos = torch.tensor(self.positions[idx], dtype=torch.float32) # pyright: ignore[reportIndexIssue]
 
-        # Create mask for non-outliers (both ground and excited energies must be within threshold)
-        valid_mask = (ground_z_scores < threshold) & (excited_z_scores_max < threshold)
-
-        # Apply mask to all arrays that correspond to per-structure data
-        self.couplings = self.couplings[valid_mask]
-        self.energies_excited = self.energies_excited[valid_mask]
-        self.energies_ground = self.energies_ground[valid_mask]
-        self.forces_excited = self.forces_excited[valid_mask]
-        self.forces_ground = self.forces_ground[valid_mask]
-        self.positions = self.positions[valid_mask]
-        if self.oscillator_strengths is not None:
-            self.oscillator_strengths = self.oscillator_strengths[valid_mask]
-
-        # atomic_numbers and metadata are kept as-is since they don't correspond to per-structure data
-
-    def _normalize_energies(self):
-        """
-        Normalize energies while preserving physical relationships.
-        All energies are shifted by the minimum ground state energy,
-        so ground state energies start from 0 and excitation energies are preserved.
-        """
-        # Find global minimum ground state energy across all structures
-        min_ground_energy = np.min(self.energies_ground)
-
-        # Shift both ground and excited energies by the same amount
-        # This preserves excitation energies = excited - ground
-        self.energies_ground = self.energies_ground - min_ground_energy
-        self.energies_excited = self.energies_excited - min_ground_energy
-
-        # Verify that ground state energies are now >= 0
-        assert np.min(self.energies_ground) >= -1e-10, (
-            "Ground state energies should be >= 0"
+        atom_mask = torch.tensor(z_raw > 0) # pyright: ignore[reportOperatorIssue]
+        z = torch.tensor(
+            [self.atom_to_index[a] if a > 0 else 0 for a in z_raw], # pyright: ignore[reportGeneralTypeIssues]
+            dtype=torch.long,
         )
 
-        # Store the shift for potential later use
-        self.energy_shift = min_ground_energy
+        edge_index, edge_attr = self._create_edges(pos, atom_mask)
 
-        print("Energy normalization applied:")
-        print(f"  Shift: {min_ground_energy:.6f} Hartree")
-        print(
-            f"  Ground state range: [{self.energies_ground.min():.6f}, {self.energies_ground.max():.6f}]"
+        return Data(
+            x=z,
+            pos=pos,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            atom_mask=atom_mask,
+            lambda_max=torch.tensor(self.lambda_max[idx], dtype=torch.float32), # pyright: ignore[reportIndexIssue]
+            phi_delta=torch.tensor(self.phi_delta[idx], dtype=torch.float32), # pyright: ignore[reportIndexIssue]
+            idx=idx,
         )
-        print(
-            f"  Excited state range: [{self.energies_excited.min():.6f}, {self.energies_excited.max():.6f}]"
-        )
-
-    def _normalize_forces(self):
-        """
-        Normalize the Numpy array of forces_ground and forces_excited from the data_dict using z-score
-        """
-
-        # Function to normalize all forces
-        def normalize_force(forces):
-            mean_force = np.mean(forces, axis=0)
-            std_force = np.std(forces, axis=0)
-            std_force[std_force < 1e-8] = 1.0
-            return (forces - mean_force) / std_force
-
-        # Normalize forces_ground and forces_excited
-        self.forces_ground = normalize_force(self.forces_ground)
-        self.forces_excited = normalize_force(self.forces_excited)
-
-    def _normalize_couplings(self):
-        """
-        Normalize the Numpy array of couplings from the data_dict using typical magnitudes (median)
-        """
-
-        nonzero_mask = np.abs(self.couplings) > 1e-10
-        if np.any(nonzero_mask):
-            coupling_scale = np.median(np.abs(self.couplings[nonzero_mask]))
-        else:
-            coupling_scale = 1.0  # fallback
-
-        # Scale by typical magnitude
-        self.couplings = self.couplings / coupling_scale
-        self.coupling_scale = coupling_scale
-
-    def preprocess(self):
-        """
-        Process the dataset by removing outliers and normalizing energies, forces, and couplings.
-        """
-        self._remove_outliers(threshold=3.0)
-        self._normalize_energies()
-        self._normalize_forces()
-        self._normalize_couplings()
-
-    def _create_splits(self):
-        """
-        Create train/validation/test splits with shuffling.
-        """
-        # Set random seed for reproducibility
-        np.random.seed(self.random_seed)
-
-        # Create shuffled indices
-        indices = np.arange(self.n_structures)
-        np.random.shuffle(indices)
-
-        # Calculate split points
-        train_end = int(self.train_split * self.n_structures)
-        val_end = train_end + int(self.val_split * self.n_structures)
-
-        # Create splits
-        self.train_indices = indices[:train_end]
-        self.val_indices = indices[train_end:val_end]
-        self.test_indices = indices[val_end:]
-
-        print("Dataset splits created:")
-        print(f"  Train: {len(self.train_indices)} samples")
-        print(f"  Validation: {len(self.val_indices)} samples")
-        print(f"  Test: {len(self.test_indices)} samples")
-
-    def _store_normalization_params(self):
-        """
-        Store normalization parameters for later use.
-        """
-        # Calculate energy normalization parameters (min values used for shifting)
-        self.energy_ground_min = np.min(self.energies_ground)
-        self.energy_excited_min = np.min(self.energies_excited, axis=0)
-
-        # Force normalization parameters (mean and std)
-        self.force_ground_mean = np.mean(self.forces_ground, axis=0)
-        self.force_ground_std = np.std(self.forces_ground, axis=0)
-        self.force_excited_mean = np.mean(self.forces_excited, axis=0)
-        self.force_excited_std = np.std(self.forces_excited, axis=0)
-
-        # Coupling scale already stored in _normalize_couplings
-
-        self.normalization_params = {
-            "energy_ground_min": float(self.energy_ground_min),
-            "energy_excited_min": self.energy_excited_min.tolist()
-            if hasattr(self.energy_excited_min, "tolist")
-            else float(self.energy_excited_min),
-            "force_ground_mean": self.force_ground_mean.tolist(),
-            "force_ground_std": self.force_ground_std.tolist(),
-            "force_excited_mean": self.force_excited_mean.tolist(),
-            "force_excited_std": self.force_excited_std.tolist(),
-            "coupling_scale": float(self.coupling_scale),
-        }
-
-    def get_subset(self, indices):
-        """
-        Create a subset dataset with specific indices.
-        """
-        subset = GeometricSubset(self, indices)
-        return subset
-
-    def get_dataloaders(self, num_workers=0):
-        """
-        Create DataLoader objects for train, validation, and test sets.
-
-        Args:
-            num_workers: Number of workers for data loading (default: 0 for single-threaded)
-
-        Returns:
-            train_loader, val_loader, test_loader
-        """
-        # Create subset datasets
-        train_dataset = self.get_subset(self.train_indices)
-        val_dataset = self.get_subset(self.val_indices)
-        test_dataset = self.get_subset(self.test_indices)
-
-        # Create DataLoaders
-        train_loader = DataLoader(
-            train_dataset,  # type: ignore
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
-        )
-
-        val_loader = DataLoader(
-            val_dataset,  # type: ignore
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
-        )
-
-        test_loader = DataLoader(
-            test_dataset,  # type: ignore
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
-        )
-
-        return train_loader, val_loader, test_loader
-
-    def save_normalization_params(self, filepath):
-        """
-        Save normalization parameters to a JSON file.
-        """
-        import json
-
-        with open(filepath, "w") as f:
-            json.dump(self.normalization_params, f, indent=2)
-        print(f"Normalization parameters saved to {filepath}")
-
-    def get_dataset_stats(self):
-        """
-        Get statistics about the dataset.
-        """
-        stats = {
-            "total_structures": self.n_structures,
-            "train_size": len(self.train_indices),
-            "val_size": len(self.val_indices),
-            "test_size": len(self.test_indices),
-            "n_atoms": self.atomic_numbers.shape[1],  # max_atoms per molecule
-            "n_molecules": self.atomic_numbers.shape[0],
-            "energy_ground_range": [
-                float(np.min(self.energies_ground)),
-                float(np.max(self.energies_ground)),
-            ],
-            "energy_excited_shape": list(self.energies_excited.shape),
-            "forces_shape": list(self.forces_ground.shape),
-            "couplings_shape": list(self.couplings.shape),
-        }
-
-        # Add statistics for new photodynamic properties
-        if self.lambda_max is not None:
-            stats["lambda_max_range"] = [
-                float(np.min(self.lambda_max)),
-                float(np.max(self.lambda_max)),
-            ]
-
-        if self.phi_delta is not None:
-            stats["phi_delta_range"] = [
-                float(np.min(self.phi_delta)),
-                float(np.max(self.phi_delta)),
-            ]
-
-        if self.oscillator_strengths is not None:
-            stats["oscillator_strengths_shape"] = list(self.oscillator_strengths.shape)
-
-        if self.mol_ids is not None:
-            stats["n_molecules_with_ids"] = len(self.mol_ids)
-
-        if self.smiles is not None:
-            stats["n_molecules_with_smiles"] = len(self.smiles)
-
-        return stats
 
     def len(self):
         return self.n_structures
 
-    def get(self, idx):
-        # Get atomic numbers for this molecule (keep padding for consistent batching)
-        mol_atomic_numbers = self.atomic_numbers[idx]  # Shape: (max_atoms,)
-
-        # Create mask for real atoms (non-zero atomic numbers)
-        atom_mask = torch.tensor(
-            mol_atomic_numbers > 0, dtype=torch.bool
-        )  # Shape: (max_atoms,)
-
-        # Get structure data (keep all atoms including padding)
-        pos = torch.tensor(
-            self.positions[idx], dtype=torch.float
-        )  # Shape: (max_atoms, 3)
-
-        # Map atomic numbers to indices (use 0 for padded atoms)
-        mol_atomic_indices = np.array(
-            [self.atom_to_index[atom] if atom > 0 else 0 for atom in mol_atomic_numbers]
-        )
-        z = torch.tensor(mol_atomic_indices, dtype=torch.long)  # Shape: (max_atoms,)
-
-        # Create edges based on cutoff (only between real atoms)
-        edge_index, edge_attr = self._create_edges(pos, atom_mask)
-
-        # Prepare targets - combine ground and excited states as per architecture guide
-        # Combine energies: [ground_state, excited_state_1, excited_state_2, ...]
-        energy_ground = self.energies_ground[idx : idx + 1]  # Shape: (1,)
-        if self.energies_excited.ndim > 1:
-            energy_excited = self.energies_excited[idx]  # Shape: (n_excited,)
-        else:
-            energy_excited = self.energies_excited[idx : idx + 1]  # Shape: (1,)
-        energies = torch.cat(
-            [
-                torch.tensor(energy_ground, dtype=torch.float32),
-                torch.tensor(energy_excited, dtype=torch.float32),
-            ]
-        )  # Shape: (n_states,) where n_states = 1 + n_excited
-
-        # Combine forces: [ground_forces, excited_forces_1, excited_forces_2, ...] (keep padding)
-        forces = torch.stack(
-            [
-                torch.tensor(
-                    self.forces_ground[idx], dtype=torch.float32
-                ),  # Shape: (max_atoms, 3)
-                *[
-                    torch.tensor(self.forces_excited[idx][i], dtype=torch.float32)
-                    for i in range(self.forces_excited.shape[1])
-                ],  # Each shape: (max_atoms, 3)
-            ]
-        )  # Shape: (n_states, max_atoms, 3)
-
-        # Non-adiabatic couplings (keep padding)
-        nac = torch.tensor(
-            self.couplings[idx], dtype=torch.float32
-        )  # Shape: (n_couplings, max_atoms, 3)
-
-        # Additional photodynamic properties
-        lambda_max_val = None
-        if self.lambda_max is not None:
-            lambda_max_val = torch.tensor(self.lambda_max[idx], dtype=torch.float32)
-
-        phi_delta_val = None
-        if self.phi_delta is not None:
-            phi_delta_val = torch.tensor(self.phi_delta[idx], dtype=torch.float32)
-
-        oscillator_strengths_val = None
-        if self.oscillator_strengths is not None:
-            oscillator_strengths_val = torch.tensor(
-                self.oscillator_strengths[idx], dtype=torch.float32
-            )
-
-        mol_id_val = None
-        if self.mol_ids is not None:
-            mol_id_val = (
-                self.mol_ids[idx]
-                if isinstance(self.mol_ids[idx], str)
-                else self.mol_ids[idx].decode("utf-8")
-            )
-
-        return Data(
-            x=z,  # Node features (atomic numbers)
-            pos=pos,  # Node positions
-            edge_index=edge_index,  # Edge indices
-            edge_attr=edge_attr,  # Edge attributes (distances and unit vectors)
-            atom_mask=atom_mask,  # Mask for real vs padded atoms
-            energies=energies,  # Combined energies (n_states,)
-            forces=forces,  # Combined forces (n_states, max_atoms, 3)
-            nac=nac,  # Non-adiabatic couplings (n_couplings, max_atoms, 3)
-            lambda_max=lambda_max_val,  # Maximum absorption wavelength
-            phi_delta=phi_delta_val,  # Singlet oxygen quantum yield
-            oscillator_strengths=oscillator_strengths_val,  # Oscillator strengths
-            mol_id=mol_id_val,  # Molecule identifier
-            idx=idx,
+    def get_dataloaders(self, num_workers=0):
+        return (
+            DataLoader(
+                GeometricSubset(self, self.train_indices), # pyright: ignore[reportArgumentType]
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+            ),
+            DataLoader(
+                GeometricSubset(self, self.val_indices), # pyright: ignore[reportArgumentType]
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+            ),
+            DataLoader(
+                GeometricSubset(self, self.test_indices), # pyright: ignore[reportArgumentType]
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+            ),
         )
 
-    def _create_edges(self, positions, atom_mask=None):
-        n_atoms = positions.size(0)
+    def _create_edges(self, pos, atom_mask):
+        real_idx = torch.where(atom_mask)[0]
+        real_pos = pos[atom_mask]
 
-        # Filter positions to only real atoms if mask is provided
-        if atom_mask is not None:
-            real_positions = positions[atom_mask]
-            n_real_atoms = real_positions.size(0)
-            real_atom_indices = torch.where(atom_mask)[0]
-        else:
-            real_positions = positions
-            n_real_atoms = n_atoms
-            real_atom_indices = torch.arange(n_atoms)
+        if real_pos.size(0) == 0:
+            return torch.empty((2, 0), dtype=torch.long), torch.empty((0, 4))
 
-        if self.cutoff_radius is None:
-            # Full connectivity (all pairs except self-loops) among real atoms
-            row, col = torch.meshgrid(
-                torch.arange(n_real_atoms), torch.arange(n_real_atoms), indexing="ij"
-            )
-            mask = row != col
-            # Map back to original atom indices
-            edge_index = torch.stack(
-                [real_atom_indices[row[mask]], real_atom_indices[col[mask]]], dim=0
-            )
-        else:
-            # Cutoff-based connectivity among real atoms
-            dist_matrix = torch.cdist(
-                real_positions.unsqueeze(0), real_positions.unsqueeze(0)
-            )[0]
-            mask = (dist_matrix < self.cutoff_radius) & (dist_matrix > 0)
-            local_edge_index = mask.nonzero().t().contiguous()
-            # Map back to original atom indices
-            if local_edge_index.size(1) > 0:
-                edge_index = torch.stack(
-                    [
-                        real_atom_indices[local_edge_index[0]],
-                        real_atom_indices[local_edge_index[1]],
-                    ],
-                    dim=0,
-                )
-            else:
-                edge_index = torch.empty((2, 0), dtype=torch.long)
+        dist = torch.cdist(real_pos, real_pos)
+        mask = (dist < self.cutoff_radius) & (dist > 0)
 
-        # Calculate edge attributes (distances, unit vectors)
-        if edge_index.size(1) > 0:
-            row, col = edge_index
-            diff = (
-                positions[col] - positions[row]
-            )  # Shape: (n_edges, 3) for displacement vectors
-            distances = torch.norm(diff, dim=1, keepdim=True)  # Shape: (n_edges, 1)
-            unit_vectors = diff / (
-                distances + 1e-8
-            )  # Shape: (n_edges, 3), avoiding division by 0
+        row, col = mask.nonzero(as_tuple=True)
+        edge_index = torch.stack(
+            [real_idx[row], real_idx[col]], dim=0
+        )
 
-            edge_attr = torch.cat([distances, unit_vectors], dim=1)
-        else:
-            edge_attr = torch.empty((0, 4), dtype=torch.float)
+        diff = pos[edge_index[1]] - pos[edge_index[0]]
+        d = torch.norm(diff, dim=1, keepdim=True)
+        u = diff / (d + 1e-8)
 
+        edge_attr = torch.cat([d, u], dim=1)
         return edge_index, edge_attr
-
-
-if __name__ == "__main__":
-    file_path = "/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/data/photosensitizer_dataset.h5"
-
-    # Create dataset with DataLoader functionality
-    dataset = DatasetConstructor(
-        file_path,
-        cutoff_radius=5,
-        batch_size=16,
-        train_split=0.8,
-        val_split=0.1,
-        random_seed=42,
-    )
-
-    # Get DataLoaders
-    train_loader, val_loader, test_loader = dataset.get_dataloaders(num_workers=2)
-
-    # Print dataset statistics
-    stats = dataset.get_dataset_stats()
-    print("\nDataset Statistics:")
-    for key, value in stats.items():
-        print(f"  {key}: {value}")
-
-    # Save normalization parameters
-    dataset.save_normalization_params(
-        "/Users/sumerchaudhary/Documents/QuantumProjects/Projects/MANA/data/normalization_params.json"
-    )
-
-    # Test iteration through DataLoader
-    print("\nTesting DataLoader iteration:")
-    for batch_idx, batch in enumerate(train_loader):
-        print(
-            f"  Batch {batch_idx}: {batch.x.size(0)} atoms, {batch.batch.max().item() + 1} graphs"
-        )
-        if batch_idx >= 2:  # Just test first few batches
-            break
-
-    print("Dataset construction test completed successfully!")

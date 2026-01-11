@@ -6,4 +6,4 @@ __pycache__/
 __init__.py
 models/
 benzene/
-data/
+/data/

@@ -28,7 +28,6 @@ class TrainingEngine:
         self.val_loader = val_loader
         self.save_dir = save_dir
 
-        self.loss_weights = hyperparams["loss_weights"]
         self.max_epochs = hyperparams["max_epochs"]
         self.patience = hyperparams["early_stopping_patience"]
 
@@ -44,15 +43,12 @@ class TrainingEngine:
         self.history = {
             "train_total": [],
             "val_total": [],
-            "train_E": [],
-            "train_nac": [],
             "train_lambda": [],
             "train_phi": [],
-            "val_E": [],
-            "val_nac": [],
             "val_lambda": [],
             "val_phi": [],
         }
+
 
     def train(self):
         best_val = float("inf")
@@ -65,25 +61,22 @@ class TrainingEngine:
             # store history
             self.history["train_total"].append(train_total)
             self.history["val_total"].append(val_total)
-
-            self.history["train_E"].append(train_comps["E"])
-            self.history["train_nac"].append(train_comps["nac"])
+            
             self.history["train_lambda"].append(train_comps["lambda"])
             self.history["train_phi"].append(train_comps["phi"])
-
-            self.history["val_E"].append(val_comps["E"])
-            self.history["val_nac"].append(val_comps["nac"])
+            
             self.history["val_lambda"].append(val_comps["lambda"])
             self.history["val_phi"].append(val_comps["phi"])
 
             # Print totals and components for transparency
             print(
                 f"Epoch {epoch:4d} | "
-                f"Train: {train_total:.6f} (E={train_comps['E']:.6f}, nac={train_comps['nac']:.6f}, "
-                f"lambda={train_comps['lambda']:.6f}, phi={train_comps['phi']:.6f}) | "
-                f"Val: {val_total:.6f} (E={val_comps['E']:.6f}, nac={val_comps['nac']:.6f}, "
-                f"lambda={val_comps['lambda']:.6f}, phi={val_comps['phi']:.6f})"
+                f"Train: {train_total:.6f} "
+                f"(λ={train_comps['lambda']:.6f}, φ={train_comps['phi']:.6f}) | "
+                f"Val: {val_total:.6f} "
+                f"(λ={val_comps['lambda']:.6f}, φ={val_comps['phi']:.6f})"
             )
+
 
             # checkpointing based on validation total loss
             if val_total < best_val:
@@ -111,91 +104,69 @@ class TrainingEngine:
 
     def _train_epoch(self):
         self.model.train()
-
-        # accumulators (sum over batches)
-        total = 0.0
-        total_E = 0.0
-        total_nac = 0.0
+    
+        total_loss = 0.0
         total_lambda = 0.0
         total_phi = 0.0
-
         n_batches = 0
-
+    
         for batch in self.train_loader:
             batch = batch.to(self.device)
             preds = self.model(batch)
-            # model.loss_fn returns: total_loss, loss_E, loss_nac, loss_lambda, loss_phi
-            loss_total, loss_E, loss_nac, loss_lambda, loss_phi = self.model.loss_fn(
-                preds, batch, self.loss_weights
-            )
-
-            assert not torch.isnan(loss_total)  # guard
-
+            loss, metrics = self.model.loss_fn(preds, batch)
+    
             self.optimizer.zero_grad()
-            loss_total.backward()
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
-
-            # convert to floats and accumulate
-            total += float(loss_total.item())
-            total_E += float(loss_E.item())
-            total_nac += float(loss_nac.item())
-            total_lambda += float(loss_lambda.item())
-            total_phi += float(loss_phi.item())
-
+    
+            total_loss += loss.item()
+            total_lambda += metrics.get("loss_lambda", 0.0)
+            total_phi += metrics.get("loss_phi", 0.0)
             n_batches += 1
-
-        # average over batches
+    
         if n_batches == 0:
-            return 0.0, {"E": 0.0, "nac": 0.0, "lambda": 0.0, "phi": 0.0}
+            return 0.0, {"lambda": 0.0, "phi": 0.0}
+    
+        return (
+            total_loss / n_batches,
+            {
+                "lambda": total_lambda / n_batches,
+                "phi": total_phi / n_batches,
+            },
+        )
 
-        mean_total = total / n_batches
-        mean_E = total_E / n_batches
-        mean_nac = total_nac / n_batches
-        mean_lambda = total_lambda / n_batches
-        mean_phi = total_phi / n_batches
-
-        comps = {"E": mean_E, "nac": mean_nac, "lambda": mean_lambda, "phi": mean_phi}
-        return mean_total, comps
 
     @torch.no_grad()
     def _validate(self):
         self.model.eval()
-
-        total = 0.0
-        total_E = 0.0
-        total_nac = 0.0
+    
+        total_loss = 0.0
         total_lambda = 0.0
         total_phi = 0.0
-
         n_batches = 0
-
+    
         for batch in self.val_loader:
             batch = batch.to(self.device)
             preds = self.model(batch)
-            loss_total, loss_E, loss_nac, loss_lambda, loss_phi = self.model.loss_fn(
-                preds, batch, self.loss_weights
-            )
-
-            total += float(loss_total.item())
-            total_E += float(loss_E.item())
-            total_nac += float(loss_nac.item())
-            total_lambda += float(loss_lambda.item())
-            total_phi += float(loss_phi.item())
-
+            loss, metrics = self.model.loss_fn(preds, batch)
+    
+            total_loss += loss.item()
+            total_lambda += metrics.get("loss_lambda", 0.0)
+            total_phi += metrics.get("loss_phi", 0.0)
             n_batches += 1
-
+    
         if n_batches == 0:
-            return 0.0, {"E": 0.0, "nac": 0.0, "lambda": 0.0, "phi": 0.0}
+            return 0.0, {"lambda": 0.0, "phi": 0.0}
+    
+        return (
+            total_loss / n_batches,
+            {
+                "lambda": total_lambda / n_batches,
+                "phi": total_phi / n_batches,
+            },
+        )
 
-        mean_total = total / n_batches
-        mean_E = total_E / n_batches
-        mean_nac = total_nac / n_batches
-        mean_lambda = total_lambda / n_batches
-        mean_phi = total_phi / n_batches
-
-        comps = {"E": mean_E, "nac": mean_nac, "lambda": mean_lambda, "phi": mean_phi}
-        return mean_total, comps
 
     def _save_history(self):
         # Convert lists to numpy arrays and save
@@ -217,14 +188,6 @@ class TrainingEngine:
         )
 
         # components (train dashed, val dotted)
-        plt.plot(
-            epochs, self.history["train_E"], "--", label="Train E", color="tab:green"
-        )
-        plt.plot(epochs, self.history["val_E"], ":", label="Val E", color="tab:green")
-        plt.plot(
-            epochs, self.history["train_nac"], "--", label="Train NAC", color="tab:red"
-        )
-        plt.plot(epochs, self.history["val_nac"], ":", label="Val NAC", color="tab:red")
         plt.plot(
             epochs,
             self.history["train_lambda"],
