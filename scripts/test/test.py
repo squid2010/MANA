@@ -97,17 +97,10 @@ def main():
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    if dataset.energies_excited.ndim > 1:
-        num_excited = dataset.energies_excited.shape[1]
-    else:
-        num_excited = 1
-    num_states = 1 + num_excited
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model = MANA(
         num_atom_types=dataset.num_atom_types,
-        num_states=num_states,
         hidden_dim=128,
         num_layers=4,
         num_rbf=20,
@@ -123,8 +116,6 @@ def main():
     # ------------------------------------------------------------------
     # Accumulators
     # ------------------------------------------------------------------
-    E_true, E_pred = [], []
-    nac_true, nac_pred = [], []
     lambda_true, lambda_pred = [], []
     phi_true, phi_pred = [], []
 
@@ -134,32 +125,18 @@ def main():
     with torch.no_grad():
         for batch in test_loader:
             batch = batch.to(device)
-            energies, _, nac, lambda_max, phi = model(batch)
-
-            # Energies
-            E_pred.append(energies.cpu().numpy())
-            E_true.append(batch.energies.view(energies.shape).cpu().numpy())
-
-            # NAC magnitudes
-            nac_pred.append(torch.norm(nac, dim=-1).cpu().numpy())
-            nac_true.append(torch.norm(batch.nac, dim=(-1, -2)).cpu().numpy())
-
+            preds = model(batch)
+            
             # Spectroscopy
-            lambda_pred.append(lambda_max.squeeze(-1).cpu().numpy())
+            lambda_pred.append(preds["lambda"].cpu().numpy())
             lambda_true.append(batch.lambda_max.cpu().numpy())
 
-            phi_pred.append(phi.squeeze(-1).cpu().numpy())
+            phi_pred.append(preds["phi"].cpu().numpy())
             phi_true.append(batch.phi_delta.cpu().numpy())
 
     # ------------------------------------------------------------------
     # Stack
     # ------------------------------------------------------------------
-    E_true = np.vstack(E_true)
-    E_pred = np.vstack(E_pred)
-
-    nac_true = np.concatenate([x.reshape(-1) for x in nac_true])
-    nac_pred = np.concatenate([x.reshape(-1) for x in nac_pred])
-
 
     lambda_true = np.concatenate(lambda_true)
     lambda_pred = np.concatenate(lambda_pred)
@@ -171,10 +148,6 @@ def main():
     # Metrics
     # ------------------------------------------------------------------
     metrics = {
-        "Energy RMSE (Ha)": rmse(E_pred, E_true),
-        "Energy MAE (Ha)": mae(E_pred, E_true),
-        "NAC RMSE": rmse(nac_pred, nac_true),
-        "NAC MAE": mae(nac_pred, nac_true),
         "Lambda_max RMSE": rmse(lambda_pred, lambda_true),
         "Lambda_max MAE": mae(lambda_pred, lambda_true),
         "Phi RMSE": rmse(phi_pred, phi_true),
@@ -193,14 +166,6 @@ def main():
     # ------------------------------------------------------------------
     # Plots
     # ------------------------------------------------------------------
-    parity_plot(
-        E_true[:, 0],
-        E_pred[:, 0],
-        "Ground-State Energy",
-        "True E₀ (Ha)",
-        "Predicted E₀ (Ha)",
-        os.path.join(out_dir, "energy_ground_parity.png"),
-    )
 
     parity_plot(
         lambda_true,
