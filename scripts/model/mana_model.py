@@ -1,8 +1,24 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_scatter import scatter_sum
 
+def scatter_sum(src, index, dim=-1, dim_size=None):
+    """
+    Native PyTorch implementation of scatter_sum to avoid torch_scatter dependency
+    which often hangs on macOS (Apple Silicon).
+    """
+    if dim_size is None:
+        dim_size = index.max().item() + 1
+        
+    # Create the output tensor of zeros
+    size = list(src.size())
+    size[dim] = dim_size
+    out = torch.zeros(size, dtype=src.dtype, device=src.device)
+    
+    # index_add_ expects the index to have the same number of dimensions as src? 
+    # No, index_add_ expects a 1D index tensor.
+    # We just need to ensure shapes match for the operation.
+    return out.index_add_(dim, index, src)
 
 class RadialBasisFunction(nn.Module):
     """
@@ -143,17 +159,38 @@ class MANA(nn.Module):
         hidden_dim=128,
         num_layers=4,
         num_rbf=20,
+        tasks=None,
+        use_solvent=False,
     ):
         super().__init__()
+        if tasks is None:
+            tasks = ["lambda", "phi"]
+        self.tasks = tasks
+        self.use_solvent = use_solvent
 
         self.embedding = nn.Embedding(num_atom_types, hidden_dim)
         self.rbf = RadialBasisFunction(num_rbf)
-
         self.layers = nn.ModuleList(
             [PaiNNLayer(hidden_dim, num_rbf) for _ in range(num_layers)]
         )
+
+        # Takes only the molecule embedding (128)
         self.lambda_head = LambdaMaxHead(hidden_dim)
-        self.phi_head = PhiDeltaHead(hidden_dim)
+
+        if self.use_solvent:
+            solvent_dim = 64
+            # Encodes Dielectric Constant (1 float) -> Vector (64)
+            self.solvent_encoder = nn.Sequential(
+                nn.Linear(1, solvent_dim),
+                nn.SiLU(),
+                nn.Linear(solvent_dim, solvent_dim)
+            )
+            
+            # Phi Head takes (Mol_Emb + Solv_Emb) = 128 + 64
+            self.phi_head = PhiDeltaHead(hidden_dim + solvent_dim)
+        else:
+            # Original behavior
+            self.phi_head = PhiDeltaHead(hidden_dim)
 
         self._init_weights()
 
@@ -165,50 +202,48 @@ class MANA(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward(self, data):
-        """
-        Defines the forward pass of the MANA
-        data: A batch of molecular graphs with attributes:
-            - x: Atomic numbers (num_atoms,)
-            - edge_index: Edge indices (2, num_edges)
-            - batch: Batch indices for atoms (num_atoms,)
-            - pos: Atomic positions (num_atoms, 3)
-        Returns: Dictionary with predictions:
-            - lambda_max: Predicted absorption maximum (num_molecules, 1)
-            - phi: Predicted singlet oxygen yield (num_molecules, 1)
-        """
-        z, pos, edge_index, batch = (
-                    data.x,
-                    data.pos,
-                    data.edge_index,
-                    data.batch,
-                )
-
-        row, col = edge_index
-        diff = pos[col] - pos[row]
-        dist = torch.norm(diff, dim=1)
-        
-        edge_attr = torch.cat(
-            [dist.unsqueeze(-1), diff / (dist.unsqueeze(-1) + 1e-8)], dim=1
+        z, edge_index, edge_attr, batch = (
+            data.x,
+            data.edge_index,
+            data.edge_attr,
+            data.batch,
         )
-        rbf = self.rbf(dist)
 
+        # 1. Run Backbone
+        dist = edge_attr[:, 0]
+        rbf = self.rbf(dist)
         s = self.embedding(z)
         v = torch.zeros(s.size(0), s.size(1), 3, device=s.device)
 
         for layer in self.layers:
             s, v = layer(s, v, edge_index, edge_attr, rbf)
 
-        # Molecular embeddings by summing atomic features
+        # Molecular Embedding
         h_mol = scatter_sum(s, batch, dim=0)
-        h_mol /= torch.bincount(batch).unsqueeze(-1)
+        h_mol = h_mol / (torch.bincount(batch).unsqueeze(-1).float() + 1e-9)
 
-        lambda_max = self.lambda_head(h_mol).squeeze(-1)
-        phi_delta = self.phi_head(h_mol).squeeze(-1)
+        results = {}
 
-        return {
-                    "lambda": lambda_max,
-                    "phi": phi_delta,
-                }
+        # 2. Lambda Head (Standard)
+        if "lambda" in self.tasks:
+            results["lambda"] = self.lambda_head(h_mol).squeeze(-1)
+
+        # 3. Phi Head (Solvent Aware)
+        if "phi" in self.tasks:
+            if self.use_solvent:
+                # Expecting data.solvent to be shape (Batch_Size, 1)
+                if not hasattr(data, 'solvent'):
+                    raise ValueError("Model expects 'data.solvent' attribute!")
+                
+                h_solv = self.solvent_encoder(data.solvent)
+                
+                # Concatenate [Molecule, Solvent]
+                h_combined = torch.cat([h_mol, h_solv], dim=1)
+                results["phi"] = self.phi_head(h_combined).squeeze(-1)
+            else:
+                results["phi"] = self.phi_head(h_mol).squeeze(-1)
+
+        return results
 
     def loss_fn(self, preds, batch):
         """
@@ -225,8 +260,8 @@ class MANA(nn.Module):
         loss = 0
         metrics = {}
         
-        if hasattr(batch, "lambda_max"):
-            mask = torch.isfinite(batch.lambda_max)
+        if "lambda" in self.tasks and hasattr(batch, "lambda_max"):
+            mask = torch.isfinite(batch.lambda_max.squeeze())
             if mask.any():
                 loss_lambda = F.huber_loss(
                     preds["lambda"][mask], 
@@ -236,8 +271,8 @@ class MANA(nn.Module):
                 loss += loss_lambda
                 metrics["loss_lambda"] = loss_lambda.item()
                 
-        if hasattr(batch, "phi_delta"):
-            mask = torch.isfinite(batch.phi_delta)
+        if "phi" in self.tasks and hasattr(batch, "phi_delta"):
+            mask = torch.isfinite(batch.phi_delta.squeeze().clamp(0, 1))
             # if mask.sum() > 1:
             #     phi_pred = preds["phi"][mask]
             #     phi_true = batch.phi_delta[mask]

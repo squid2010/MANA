@@ -1,216 +1,154 @@
-#!/usr/bin/env python3
-"""
-Dataset builder for MANA (photosensitizer PDT task).
-
-Generates a molecular graph dataset with targets:
-- lambda_max (absorption maximum, nm)
-- phi_delta (singlet oxygen quantum yield)
-
-Sources:
-- QM9 (geometry + atom types)
-- HOPV15 (organic chromophores, when available)
-
-All photodynamic targets are synthetic but physically motivated.
-"""
-
-import os
 import h5py
 import numpy as np
-import warnings
-from typing import Dict, List
-warnings.filterwarnings("ignore")
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from tqdm import tqdm
+import os
 
+# --- Configuration ---
+INPUT_CSV = "data/deepforchem.csv"
+OUTPUT_HDF5 = "data/deep4chem_data.h5"
+MAX_ATOMS = None  # Set to an integer (e.g., 100) to force a fixed size, or None to auto-calculate
 
-try:
-    from rdkit import Chem
-    from rdkit.Chem import AllChem
-    RDKIT_AVAILABLE = True
-except ImportError:
-    RDKIT_AVAILABLE = False
+def parse_deep4chem_to_hdf5(csv_path, hdf5_path):
+    print(f"Reading {csv_path}...")
+    
+    # 1. Load and Clean Data
+    try:
+        df = pd.read_csv(csv_path)
+    except FileNotFoundError:
+        print(f"Error: File not found at {csv_path}")
+        return
 
-try:
-    from torch_geometric.datasets import QM9
-    TORCH_GEOM_AVAILABLE = True
-except ImportError:
-    TORCH_GEOM_AVAILABLE = False
+    # Rename columns to match our internal logic
+    # 'Chromophore' is usually the SMILES column in Deep4Chem
+    df = df.rename(columns={
+        "Chromophore": "smiles",
+        "Absorption max (nm)": "lambda_max",
+        "Quantum yield": "phi_delta" # WARNING: This is usually Fluorescence QY in Deep4Chem
+    })
 
+    # Drop rows without essential data (SMILES or Target)
+    initial_count = len(df)
+    df = df.dropna(subset=['smiles', 'lambda_max'])
+    
+    # Handle Quantum Yield: Fill NaNs with -1 or 0 so the code doesn't break, 
+    # but you should mask these during training if they are missing.
+    df['phi_delta'] = df['phi_delta'].fillna(np.nan) 
 
-class PhotosensitizerDatasetBuilder:
-    def __init__(self, output_path: str, num_molecules: int = 1000):
-        self.output_path = output_path
-        self.num_molecules = num_molecules
-        self.molecules: List[Dict] = []
+    print(f"Filtered {initial_count} -> {len(df)} rows with valid SMILES and Lambda Max.")
 
-    # ------------------------------------------------------------
-    # Data sources
-    # ------------------------------------------------------------
-    def download_qm9(self, root="./data/qm9") -> List[Dict]:
-        if not TORCH_GEOM_AVAILABLE:
-            return []
+    # 2. Prepare Lists for Processing
+    valid_data = []
+    max_atom_count_found = 0
 
-        dataset = QM9(root=root) #pyright: ignore[reportPossiblyUnboundVariable]
-        mols = []
-
-        for i, data in enumerate(dataset):
-            if i >= self.num_molecules:
-                break
-
-            mols.append(
-                {
-                    "positions": data.pos.numpy(),
-                    "atomic_numbers": data.z.numpy(),
-                    "gap": data.y[0, 7].item(),  # HOMO-LUMO gap
-                    "mol_id": f"qm9_{i}",
-                    "smiles": "",
-                }
-            )
-
-        return mols
-
-    def download_hopv15(self) -> List[Dict]:
-        if not RDKIT_AVAILABLE:
-            return []
-
-        import pandas as pd
-
-        url = (
-            "https://raw.githubusercontent.com/"
-            "aspuru-guzik-group/photovoltaic-discovery/"
-            "master/data/hopv15.csv"
-        )
-        df = pd.read_csv(url)
-
-        mols = []
-        for i, row in df.iterrows():
-            if len(mols) >= self.num_molecules:
-                break
-
-            smi = row.get("SMILES", None)
-            if not isinstance(smi, str):
-                continue
-
-            mol = Chem.MolFromSmiles(smi) #pyright: ignore[reportPossiblyUnboundVariable, reportAttributeAccessIssue]
+    print("Generating 3D conformers (this takes time)...")
+    
+    # We use tqdm for a progress bar
+    for idx, row in tqdm(df.iterrows(), total=len(df)):
+        smiles = row['smiles']
+        
+        try:
+            # Create RDKit Molecule
+            mol = Chem.MolFromSmiles(smiles) # pyright: ignore[reportAttributeAccessIssue]
             if mol is None:
                 continue
+            
+            # Add Hydrogens (Critical for 3D geometry) 
+            mol = Chem.AddHs(mol) # pyright:ignore[reportAttributeAccessIssue]
+            
+            # Generate 3D Embedding
+            # useRandomCoords=True helps with complex rigid structures typical in dyes
+            res = AllChem.EmbedMolecule(mol, randomSeed=42, useRandomCoords=True) # pyright: ignore[reportAttributeAccessIssue]
+            if res != 0:
+               continue  # Skip if embedding fails
+            
+            # Optimize Geometry (Optional, improves quality)
+            try:
+                AllChem.UFFOptimizeMolecule(mol) # pyright: ignore[reportAttributeAccessIssue]
+            except Exception as _:
+                pass # If optimization fails, keep the raw embedding
 
-            mol = Chem.AddHs(mol) #pyright: ignore[reportPossiblyUnboundVariable, reportAttributeAccessIssue]
-            AllChem.EmbedMolecule(mol, randomSeed=42) #pyright: ignore[reportPossiblyUnboundVariable, reportAttributeAccessIssue]
-            AllChem.MMFFOptimizeMolecule(mol) #pyright: ignore[reportPossiblyUnboundVariable, reportAttributeAccessIssue]
+            # Track size for padding
+            n_atoms = mol.GetNumAtoms()
+            if n_atoms > max_atom_count_found:
+                max_atom_count_found = n_atoms
 
-            conf = mol.GetConformer()
-            positions = conf.GetPositions()
-            atomic_numbers = np.array([a.GetAtomicNum() for a in mol.GetAtoms()])
+            # Store the object and data
+            valid_data.append({
+                'mol': mol,
+                'lambda_max': float(row['lambda_max']),
+                'phi_delta': float(row['phi_delta']),
+                'smiles': str(smiles),
+                'mol_id': idx
+            })
 
-            gap = row.get("gap_eV", 2.0)
+        except Exception as _:
+            continue
 
-            mols.append(
-                {
-                    "positions": positions,
-                    "atomic_numbers": atomic_numbers,
-                    "gap": gap / 27.211,  #  pyright: ignore[reportOptionalOperand] (eV → Hartree)
-                    "mol_id": f"hopv_{i}",
-                    "smiles": smi,
-                }
-            )
+    # Determine final array shapes
+    N_samples = len(valid_data)
+    N_atoms = MAX_ATOMS if MAX_ATOMS else max_atom_count_found
+    
+    print("\nProcessing complete.")
+    print(f"Samples: {N_samples}")
+    print(f"Max Atoms (Padding size): {N_atoms}")
 
-        return mols
+    # 3. Allocate Numpy Arrays
+    # Atomic numbers (Z)
+    z_all = np.zeros((N_samples, N_atoms), dtype=np.int32)
+    # Cartesian coordinates (R)
+    pos_all = np.zeros((N_samples, N_atoms, 3), dtype=np.float32)
+    # Targets
+    lmax_all = np.zeros((N_samples,), dtype=np.float32)
+    phi_all = np.zeros((N_samples,), dtype=np.float32)
+    mol_ids_all = np.zeros((N_samples,), dtype=np.int32)
+    
+    # String storage for SMILES
+    smiles_list = []
 
-    # ------------------------------------------------------------
-    # Synthetic photodynamics
-    # ------------------------------------------------------------
-    def assign_photodynamics(self, mol: Dict) -> Dict:
-        gap_ev = abs(mol["gap"]) * 27.211
+    # 4. Fill Arrays
+    print("Compiling HDF5 arrays...")
+    for i, item in enumerate(valid_data):
+        mol = item['mol']
+        conf = mol.GetConformer()
+        n_atoms = mol.GetNumAtoms()
+        
+        # Safety clip
+        limit = min(n_atoms, N_atoms)
+        
+        # Atomic Numbers
+        z_vals = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
+        z_all[i, :limit] = z_vals[:limit]
+        
+        # Coordinates
+        pos = conf.GetPositions()
+        pos_all[i, :limit, :] = pos[:limit, :]
+        
+        # Metadata / Targets
+        lmax_all[i] = item['lambda_max']
+        phi_all[i] = item['phi_delta']
+        mol_ids_all[i] = item['mol_id']
+        smiles_list.append(item['smiles'])
 
-        lambda_max = 1240.0 / max(gap_ev, 1.0)
-        lambda_max += np.random.normal(0.0, 20.0)
-        lambda_max = np.clip(lambda_max, 300.0, 800.0)
+    # 5. Save to HDF5
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(hdf5_path), exist_ok=True)
+    
+    dt_str = h5py.special_dtype(vlen=str)
+    
+    with h5py.File(hdf5_path, "w") as f:
+        f.create_dataset("atomic_numbers", data=z_all)
+        f.create_dataset("geometries", data=pos_all)
+        f.create_dataset("lambda_max", data=lmax_all)
+        f.create_dataset("phi_delta", data=phi_all)
+        f.create_dataset("mol_ids", data=mol_ids_all)
+        
+        ds_smiles = f.create_dataset("smiles", (N_samples,), dtype=dt_str)
+        ds_smiles[:] = smiles_list
 
-        energy_factor = np.exp(-((gap_ev - 2.0) ** 2))
-        phi_delta = energy_factor * (0.6 + np.random.normal(0, 0.15))
-        phi_delta = np.clip(phi_delta, 0.05, 0.95)
-
-        mol["lambda_max"] = lambda_max
-        mol["phi_delta"] = phi_delta
-        return mol
-
-    # ------------------------------------------------------------
-    # Build pipeline
-    # ------------------------------------------------------------
-    def build(self):
-        print("Collecting molecules...")
-
-        self.molecules.extend(self.download_qm9())
-        if len(self.molecules) < self.num_molecules:
-            self.molecules.extend(self.download_hopv15())
-
-        self.molecules = self.molecules[: self.num_molecules]
-
-        if not self.molecules:
-            raise RuntimeError("No molecules collected.")
-
-        print(f"Collected {len(self.molecules)} molecules")
-
-        for i, mol in enumerate(self.molecules):
-            self.molecules[i] = self.assign_photodynamics(mol)
-
-        self._write_hdf5()
-
-    # ------------------------------------------------------------
-    # HDF5
-    # ------------------------------------------------------------
-    def _write_hdf5(self):
-        max_atoms = max(len(m["atomic_numbers"]) for m in self.molecules)
-        n = len(self.molecules)
-
-        atomic_numbers = np.zeros((n, max_atoms), dtype=np.int32)
-        geometries = np.zeros((n, max_atoms, 3), dtype=np.float32)
-        lambda_max = np.zeros(n, dtype=np.float32)
-        phi_delta = np.zeros(n, dtype=np.float32)
-
-        for i, mol in enumerate(self.molecules):
-            na = len(mol["atomic_numbers"])
-            atomic_numbers[i, :na] = mol["atomic_numbers"]
-            geometries[i, :na] = mol["positions"]
-            lambda_max[i] = mol["lambda_max"]
-            phi_delta[i] = mol["phi_delta"]
-
-        os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
-
-        with h5py.File(self.output_path, "w") as f:
-            f.create_dataset("atomic_numbers", data=atomic_numbers)
-            f.create_dataset("geometries", data=geometries)
-            f.create_dataset("lambda_max", data=lambda_max)
-            f.create_dataset("phi_delta", data=phi_delta)
-            f.create_dataset(
-                "mol_ids",
-                data=np.array([m["mol_id"].encode() for m in self.molecules]),
-            )
-            f.create_dataset(
-                "smiles",
-                data=np.array([(m["smiles"] or "").encode() for m in self.molecules]),
-            )
-
-            f.attrs["task"] = "PDT photodynamics"
-            f.attrs["targets"] = "lambda_max, phi_delta"
-            f.attrs["units_lambda_max"] = "nm"
-
-        print(f"Dataset written to {self.output_path}")
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=str, required=True)
-    parser.add_argument("--num_molecules", type=int, default=1000)
-    args = parser.parse_args()
-
-    builder = PhotosensitizerDatasetBuilder(
-        output_path=args.output,
-        num_molecules=args.num_molecules,
-    )
-    builder.build()
-
+    print(f"Success! Database saved to: {hdf5_path}")
 
 if __name__ == "__main__":
-    main()
+    parse_deep4chem_to_hdf5(INPUT_CSV, OUTPUT_HDF5)
