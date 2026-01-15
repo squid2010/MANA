@@ -7,8 +7,8 @@ from tqdm import tqdm
 import os
 
 # --- Configuration ---
-INPUT_CSV = "data/deepforchem.csv"
-OUTPUT_HDF5 = "data/deep4chem_data.h5"
+INPUT_CSV = "data/lambdamax_dataset.csv"
+OUTPUT_HDF5 = "data/lambdamax_data.h5"
 MAX_ATOMS = None  # Set to an integer (e.g., 100) to force a fixed size, or None to auto-calculate
 
 def parse_deep4chem_to_hdf5(csv_path, hdf5_path):
@@ -36,6 +36,7 @@ def parse_deep4chem_to_hdf5(csv_path, hdf5_path):
     # Handle Quantum Yield: Fill NaNs with -1 or 0 so the code doesn't break, 
     # but you should mask these during training if they are missing.
     df['phi_delta'] = df['phi_delta'].fillna(np.nan) 
+    df['dielectric'] = df['dielectric'].fillna(np.nan)
 
     print(f"Filtered {initial_count} -> {len(df)} rows with valid SMILES and Lambda Max.")
 
@@ -80,10 +81,10 @@ def parse_deep4chem_to_hdf5(csv_path, hdf5_path):
                 'mol': mol,
                 'lambda_max': float(row['lambda_max']),
                 'phi_delta': float(row['phi_delta']),
+                'dielectric': float(row['dielectric']),
                 'smiles': str(smiles),
                 'mol_id': idx
             })
-
         except Exception as _:
             continue
 
@@ -104,6 +105,7 @@ def parse_deep4chem_to_hdf5(csv_path, hdf5_path):
     lmax_all = np.zeros((N_samples,), dtype=np.float32)
     phi_all = np.zeros((N_samples,), dtype=np.float32)
     mol_ids_all = np.zeros((N_samples,), dtype=np.int32)
+    dielectric_all = np.zeros((N_samples,), dtype=np.float32)
     
     # String storage for SMILES
     smiles_list = []
@@ -129,6 +131,7 @@ def parse_deep4chem_to_hdf5(csv_path, hdf5_path):
         # Metadata / Targets
         lmax_all[i] = item['lambda_max']
         phi_all[i] = item['phi_delta']
+        dielectric_all[i] = item['dielectric']
         mol_ids_all[i] = item['mol_id']
         smiles_list.append(item['smiles'])
 
@@ -144,6 +147,7 @@ def parse_deep4chem_to_hdf5(csv_path, hdf5_path):
         f.create_dataset("lambda_max", data=lmax_all)
         f.create_dataset("phi_delta", data=phi_all)
         f.create_dataset("mol_ids", data=mol_ids_all)
+        f.create_dataset("dielectric", data=dielectric_all)
         
         ds_smiles = f.create_dataset("smiles", (N_samples,), dtype=dt_str)
         ds_smiles[:] = smiles_list
