@@ -48,12 +48,13 @@ def build_phi_hdf5():
             
             # Fallback if embedding fails
             if len(conf_ids) == 0:
-                conf_ids = AllChem.EmbedMultipleConfs(mol, numConfs=NUM_CONFS, useRandomCoords=True)
+                conf_ids = AllChem.EmbedMultipleConfs(mol, numConfs=NUM_CONFS, useRandomCoords=True) #pyright:ignore[reportAttributeAccessIssue]
 
             # Process each conformer as a separate sample
             for conf_id in conf_ids:
                 # Optional optimization (skip if it fails)
-                try: AllChem.MMFFOptimizeMolecule(mol, confId=conf_id)
+                try: 
+                    AllChem.MMFFOptimizeMolecule(mol, confId=conf_id) #pyright: ignore[reportAttributeAccessIssue]
                 except Exception as _:
                     pass
 
@@ -61,7 +62,7 @@ def build_phi_hdf5():
                     "mol": mol,
                     "conf_id": conf_id, # Track which conformer this is
                     "phi_delta": float(row['PhiDelta']),
-                    "lambda_max": float(row['lambda_max']) if not pd.isna(row['lambda_max']) else np.nan,
+                    "lambda_max": float(row['lambda_max']) if not pd.isna(row['lambda_max']) else np.nan, #pyright: ignore[reportGeneralTypeIssues]
                     "dielectric": float(row['Dielectric']),
                     "smiles": str(smi),
                     "mol_id": idx # CRITICAL: This links augmentations back to original molecule

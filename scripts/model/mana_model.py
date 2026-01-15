@@ -160,13 +160,13 @@ class MANA(nn.Module):
         num_layers=4,
         num_rbf=20,
         tasks=None,
-        use_solvent=False,
+        lambda_mean=500.0,
+        lambda_std=100.0,
     ):
         super().__init__()
         if tasks is None:
             tasks = ["lambda", "phi"]
         self.tasks = tasks
-        self.use_solvent = use_solvent
 
         self.embedding = nn.Embedding(num_atom_types, hidden_dim)
         self.rbf = RadialBasisFunction(num_rbf)
@@ -177,22 +177,21 @@ class MANA(nn.Module):
         # Takes only the molecule embedding (128)
         self.lambda_head = LambdaMaxHead(hidden_dim)
 
-        if self.use_solvent:
-            solvent_dim = 64
-            # Encodes Dielectric Constant (1 float) -> Vector (64)
-            self.solvent_encoder = nn.Sequential(
-                nn.Linear(1, solvent_dim),
-                nn.SiLU(),
-                nn.Linear(solvent_dim, solvent_dim)
-            )
-            
-            # Phi Head takes (Mol_Emb + Solv_Emb) = 128 + 64
-            self.phi_head = PhiDeltaHead(hidden_dim + solvent_dim)
-        else:
-            # Original behavior
-            self.phi_head = PhiDeltaHead(hidden_dim)
+        solvent_dim = 64
+        # Encodes Dielectric Constant (1 float) -> Vector (64)
+        self.solvent_encoder = nn.Sequential(
+            nn.Linear(1, solvent_dim),
+            nn.SiLU(),
+            nn.Linear(solvent_dim, solvent_dim)
+        )
+        
+        # Phi Head takes (Mol_Emb + Solv_Emb) = 128 + 64
+        self.phi_head = PhiDeltaHead(hidden_dim + solvent_dim)
 
         self._init_weights()
+        
+        self.register_buffer("lambda_mean", torch.tensor(lambda_mean))
+        self.register_buffer("lambda_std", torch.tensor(lambda_std))
 
     def _init_weights(self):
         for m in self.modules():
@@ -230,19 +229,16 @@ class MANA(nn.Module):
 
         # 3. Phi Head (Solvent Aware)
         if "phi" in self.tasks:
-            if self.use_solvent:
-                # Expecting data.solvent to be shape (Batch_Size, 1)
-                if not hasattr(data, 'solvent'):
-                    raise ValueError("Model expects 'data.solvent' attribute!")
-                
-                h_solv = self.solvent_encoder(data.solvent)
-                
-                # Concatenate [Molecule, Solvent]
-                h_combined = torch.cat([h_mol, h_solv], dim=1)
-                results["phi"] = self.phi_head(h_combined).squeeze(-1)
-            else:
-                results["phi"] = self.phi_head(h_mol).squeeze(-1)
-
+            # Expecting data.dielectric to be shape (Batch_Size, 1)
+            if not hasattr(data, 'dielectric'):
+                raise ValueError("Model expects 'data.dielectric' attribute!")
+            
+            h_solv = self.solvent_encoder(data.dielectric)
+            
+            # Concatenate [Molecule, Solvent]
+            h_combined = torch.cat([h_mol, h_solv], dim=1)
+            results["phi"] = self.phi_head(h_combined).squeeze(-1)
+        
         return results
 
     def loss_fn(self, preds, batch):
@@ -263,16 +259,19 @@ class MANA(nn.Module):
         if "lambda" in self.tasks and hasattr(batch, "lambda_max"):
             mask = torch.isfinite(batch.lambda_max.squeeze())
             if mask.any():
+                pred_norm = (preds["lambda"][mask] - self.lambda_mean) / self.lambda_std
+                target_norm = (batch.lambda_max[mask] - self.lambda_mean) / self.lambda_std
+                               
+                               
                 loss_lambda = F.huber_loss(
-                    preds["lambda"][mask], 
-                    batch.lambda_max[mask],
-                    delta = 20.0,
-                )
+                    pred_norm, 
+                    target_norm, 
+                    delta=1.0)
                 loss += loss_lambda
                 metrics["loss_lambda"] = loss_lambda.item()
                 
         if "phi" in self.tasks and hasattr(batch, "phi_delta"):
-            mask = torch.isfinite(batch.phi_delta.squeeze().clamp(0, 1))
+            mask = torch.isfinite(batch.phi_delta.squeeze())
             # if mask.sum() > 1:
             #     phi_pred = preds["phi"][mask]
             #     phi_true = batch.phi_delta[mask]
@@ -284,10 +283,8 @@ class MANA(nn.Module):
             #     loss += loss_phi
             #     metrics["loss_phi"] = loss_phi.item()
             if mask.any():
-                loss_phi = F.mse_loss(
-                    preds["phi"][mask],
-                    batch.phi_delta[mask],
-                )
+                
+                loss_phi = F.mse_loss(preds["phi"][mask], batch.lambda_max[mask])
                 loss += loss_phi
                 metrics["loss_phi"] = loss_phi.item()
                 
