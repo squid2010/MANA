@@ -42,7 +42,6 @@ class TrainingEngine:
             factor=0.5,
             patience=20,
             min_lr=1e-6,
-            verbose=True, # pyright: ignore[reportArgumentType]
         )
 
         os.makedirs(save_dir, exist_ok=True)
