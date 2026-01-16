@@ -230,7 +230,7 @@ class MANA(nn.Module):
         # 3. Phi Head (Solvent Aware)
         if "phi" in self.tasks:
             # Expecting data.dielectric to be shape (Batch_Size, 1)
-            if not hasattr(data, 'dielectric'):
+            if not hasattr(data, "dielectric"):
                 raise ValueError("Model expects 'data.dielectric' attribute!")
             
             h_solv = self.solvent_encoder(data.dielectric)
@@ -283,9 +283,23 @@ class MANA(nn.Module):
             #     loss += loss_phi
             #     metrics["loss_phi"] = loss_phi.item()
             if mask.any():
-                
-                loss_phi = F.mse_loss(preds["phi"][mask], batch.lambda_max[mask])
+                loss_phi = F.mse_loss(preds["phi"][mask], batch.phi_delta[mask])
                 loss += loss_phi
                 metrics["loss_phi"] = loss_phi.item()
                 
         return loss, metrics
+
+    def freeze_backbone(self):
+        """
+        Freeze the backbone layers (embedding, RBF, PaiNN layers, lambda_head).
+        Only phi_head and solvent_encoder remain trainable.
+        """
+        for param in self.embedding.parameters():
+            param.requires_grad = False
+        for param in self.rbf.parameters():
+            param.requires_grad = False
+        for param in self.layers.parameters():
+            param.requires_grad = False
+        for param in self.lambda_head.parameters():
+            param.requires_grad = False
+        print("✓ Backbone frozen (embedding + RBF + PaiNN layers + lambda_head)")

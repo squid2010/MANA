@@ -1,7 +1,13 @@
 import os
 import sys
 from pathlib import Path
+
 import torch
+
+# ------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------
+NUM_ATOM_TYPES = 54  # Universal constant - covers H(1) through I(53)
 
 # ------------------------------------------------------------------
 # Add project root to Python path
@@ -12,8 +18,8 @@ sys.path.insert(0, str(project_root))
 
 from model.mana_model import MANA  # noqa: E402
 from model.training_engine import TrainingEngine  # noqa: E402
-from data.dataset import DatasetConstructor  # noqa: E402
 
+from data.dataset import DatasetConstructor  # noqa: E402
 
 if __name__ == "__main__":
     print("=" * 100)
@@ -25,18 +31,18 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Looks for data in: ProjectRoot/data/deep4chem_data.h5
     lambda_dataset_path = project_root / "data" / "lambdamax_data.h5"
-    phi_dataset_path = project_root / "data" / "phi_data.h5"
-    
+    phi_dataset_path = project_root / "data" / "phidelta_data.h5"
+
     # Saves models in: ProjectRoot/models
     save_dir_lambda = project_root / "models" / "lambda"
     save_dir_phi = project_root / "models" / "phi"
     os.makedirs(save_dir_lambda, exist_ok=True)
     os.makedirs(save_dir_phi, exist_ok=True)
-    
+
     # --------------------------------------------------------------------------------------------------
     # TRAINING LAMBDA HEAD
     # --------------------------------------------------------------------------------------------------
-    
+
     print("=" * 80)
     print("TRAINING LAMBDA HEAD")
     print("=" * 80)
@@ -50,7 +56,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # Dataset
+    # Dataset (no mol_id splitting for lambda - typically no augmentation)
     # ------------------------------------------------------------------
     dataset = DatasetConstructor(
         str(lambda_dataset_path),
@@ -59,6 +65,7 @@ if __name__ == "__main__":
         train_split=0.8,
         val_split=0.1,
         random_seed=42,
+        split_by_mol_id=False,
     )
 
     train_loader, val_loader, test_loader = dataset.get_dataloaders(num_workers=0)
@@ -82,7 +89,7 @@ if __name__ == "__main__":
     # Model
     # ------------------------------------------------------------------
     model = MANA(
-        num_atom_types=dataset.num_atom_types,
+        num_atom_types=NUM_ATOM_TYPES,
         hidden_dim=128,
         num_layers=4,
         num_rbf=20,
@@ -97,12 +104,12 @@ if __name__ == "__main__":
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
         # MPS Fallback warning for scatter operations
-        os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
     else:
         device = torch.device("cpu")
-    
-    #device = torch.device("cpu")
-    
+
+    # device = torch.device("cpu")
+
     model = model.to(device)
 
     # ------------------------------------------------------------------
@@ -124,7 +131,7 @@ if __name__ == "__main__":
     print(f"Device: {device}")
     print(f"Learning rate: {hyperparams['learning_rate']}")
     print(f"Max epochs: {hyperparams['max_epochs']}")
-    print(f"Weight decay: {hyperparams['weight_decay']}")    
+    print(f"Weight decay: {hyperparams['weight_decay']}")
     print(f"Active Training Tasks: {hyperparams['tasks']}")
     print("=" * 60)
 
@@ -153,8 +160,9 @@ if __name__ == "__main__":
         print(f"\nTraining failed with error:\n{e}")
         # Print full traceback for easier debugging
         import traceback
+
         traceback.print_exc()
-        
+
     # --------------------------------------------------------------------------------------------------
     # TRAINING PHI HEAD
     # --------------------------------------------------------------------------------------------------
@@ -172,7 +180,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # Dataset
+    # Dataset (use mol_id splitting to prevent data leakage with conformer augmentation)
     # ------------------------------------------------------------------
     dataset = DatasetConstructor(
         str(phi_dataset_path),
@@ -181,6 +189,8 @@ if __name__ == "__main__":
         train_split=0.8,
         val_split=0.1,
         random_seed=42,
+        split_by_mol_id=True,  # Critical for augmented datasets!
+        augment_train=False,  # No on-the-fly augmentation - phi is electronic, not geometric
     )
 
     train_loader, val_loader, test_loader = dataset.get_dataloaders(num_workers=0)
@@ -190,13 +200,13 @@ if __name__ == "__main__":
     print(f"Validation samples: {len(val_loader.dataset)}")  # pyright: ignore
 
     # ------------------------------------------------------------------
-    # Hyperparameters
+    # Hyperparameters (increased regularization for small dataset)
     # ------------------------------------------------------------------
     hyperparams = {
-        "learning_rate": 5e-4,
+        "learning_rate": 1e-4,  # Lower LR since backbone is frozen
         "max_epochs": 250,
-        "early_stopping_patience": 40,
-        "weight_decay": 1e-5,
+        "early_stopping_patience": 30,
+        "weight_decay": 1e-4,  # Increased from 1e-5 for stronger regularization
         "tasks": ["phi"],
     }
 
@@ -204,7 +214,7 @@ if __name__ == "__main__":
     # Model
     # ------------------------------------------------------------------
     model = MANA(
-        num_atom_types=dataset.num_atom_types,
+        num_atom_types=NUM_ATOM_TYPES,
         hidden_dim=128,
         num_layers=4,
         num_rbf=20,
@@ -212,8 +222,16 @@ if __name__ == "__main__":
         lambda_mean=dataset.lambda_mean,
         lambda_std=dataset.lambda_std,
     )
-    
-    model.load_state_dict(torch.load(save_dir_lambda / "best_model.pth"), strict=False)
+
+    # Load pretrained backbone from lambda training
+    print("Loading pretrained weights from lambda model...")
+    model.load_state_dict(
+        torch.load(save_dir_lambda / "best_model.pth", weights_only=True), strict=False
+    )
+
+    # Freeze backbone (only train phi_head and solvent_encoder)
+    model.freeze_backbone()
+
     model = model.to(device)
 
     # Device Selection
@@ -222,11 +240,11 @@ if __name__ == "__main__":
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
         # MPS Fallback warning for scatter operations
-        os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
     else:
         device = torch.device("cpu")
-    
-    #device = torch.device("cpu"))
+
+    # device = torch.device("cpu"))
 
     # ------------------------------------------------------------------
     # Training Engine
@@ -247,7 +265,7 @@ if __name__ == "__main__":
     print(f"Device: {device}")
     print(f"Learning rate: {hyperparams['learning_rate']}")
     print(f"Max epochs: {hyperparams['max_epochs']}")
-    print(f"Weight decay: {hyperparams['weight_decay']}")    
+    print(f"Weight decay: {hyperparams['weight_decay']}")
     print(f"Active Training Tasks: {hyperparams['tasks']}")
     print("=" * 60)
 
@@ -276,4 +294,5 @@ if __name__ == "__main__":
         print(f"\nTraining failed with error:\n{e}")
         # Print full traceback for easier debugging
         import traceback
+
         traceback.print_exc()

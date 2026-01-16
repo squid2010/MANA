@@ -99,8 +99,8 @@ def plot_loss_curves(npz_path: str, output_path: str) -> None:
 
 def main():
     # Default paths
-    npz_path = "models/loss_history.npz"
-    output_path = "models/loss.png"
+    npz_path = "models/phi/loss_history.npz"
+    output_path = "models/phi/loss.png"
 
     if not os.path.exists(npz_path):
         raise FileNotFoundError(f"Could not find loss_history.npz at: {npz_path}")

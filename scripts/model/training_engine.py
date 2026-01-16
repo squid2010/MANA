@@ -30,8 +30,9 @@ class TrainingEngine:
         self.max_epochs = hyperparams["max_epochs"]
         self.patience = hyperparams["early_stopping_patience"]
 
+        # Only optimize parameters that require gradients (supports frozen backbone)
         self.optimizer = Adam(
-            self.model.parameters(),
+            filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=hyperparams["learning_rate"],
             weight_decay=hyperparams["weight_decay"],
         )
