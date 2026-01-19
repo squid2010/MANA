@@ -7,7 +7,7 @@ import torch
 # ------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------
-NUM_ATOM_TYPES = 54  # Universal constant - covers H(1) through I(53)
+NUM_ATOM_TYPES = 118  # Universal constant - covers H(1) through I(53)
 
 # ------------------------------------------------------------------
 # Add project root to Python path

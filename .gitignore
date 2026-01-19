@@ -4,6 +4,6 @@
 *.extxyz
 __pycache__/
 __init__.py
-benzene/
+/benzene/
 /notes/
 /data/

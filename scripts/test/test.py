@@ -16,6 +16,7 @@ project_root = script_dir.parent.parent
 sys.path.insert(0, str(script_dir.parent))
 
 from model.mana_model import MANA  # noqa: E402
+
 from data.dataset import DatasetConstructor  # noqa: E402
 
 # ---------------------------------------------------------------------
@@ -31,8 +32,10 @@ NUM_ATOM_TYPES = 118
 def rmse(pred, true):
     return np.sqrt(np.mean((pred - true) ** 2))
 
+
 def mae(pred, true):
     return np.mean(np.abs(pred - true))
+
 
 # ---------------------------------------------------------------------
 # Plot helpers
@@ -42,7 +45,7 @@ def parity_plot(y_true, y_pred, title, xlabel, ylabel, path):
         return
 
     plt.figure(figsize=(6, 6))
-    
+
     # Dynamic limits
     min_val = min(y_true.min(), y_pred.min())
     max_val = max(y_true.max(), y_pred.max())
@@ -50,8 +53,8 @@ def parity_plot(y_true, y_pred, title, xlabel, ylabel, path):
     lims = [min_val - buffer, max_val + buffer]
 
     plt.plot(lims, lims, "k--", linewidth=1, alpha=0.5)
-    plt.scatter(y_true, y_pred, s=15, alpha=0.5, c='tab:blue', edgecolors='none')
-    
+    plt.scatter(y_true, y_pred, s=15, alpha=0.5, c="tab:blue", edgecolors="none")
+
     plt.xlim(lims)
     plt.ylim(lims)
     plt.xlabel(xlabel)
@@ -62,8 +65,10 @@ def parity_plot(y_true, y_pred, title, xlabel, ylabel, path):
     plt.savefig(path, dpi=300)
     plt.close()
 
+
 def residual_hist(residuals, title, xlabel, path):
-    if len(residuals) == 0: return
+    if len(residuals) == 0:
+        return
 
     plt.figure(figsize=(6, 4))
     plt.hist(
@@ -81,6 +86,7 @@ def residual_hist(residuals, title, xlabel, path):
     plt.tight_layout()
     plt.savefig(path, dpi=300)
     plt.close()
+
 
 # ---------------------------------------------------------------------
 # Generic Lambda Test Function
@@ -113,7 +119,7 @@ def _test_lambda_model(device, out_dir, model_path, output_subdir, title):
     print(f"Dataset: {dataset_path}")
     print(f"Model:   {model_path}")
 
-    # Load Dataset
+    # Load Dataset (no mol_id splitting for lambda - same as training)
     dataset = DatasetConstructor(
         str(dataset_path),
         cutoff_radius=5.0,
@@ -121,6 +127,7 @@ def _test_lambda_model(device, out_dir, model_path, output_subdir, title):
         train_split=0.8,
         val_split=0.1,
         random_seed=42,
+        split_by_mol_id=False,
     )
 
     _, _, test_loader = dataset.get_dataloaders(num_workers=0)
@@ -244,7 +251,7 @@ def test_phi(device, out_dir):
     print(f"Dataset: {dataset_path}")
     print(f"Model:   {model_path}")
 
-    # Load Dataset
+    # Load Dataset (split_by_mol_id=True to match training and prevent data leakage)
     dataset = DatasetConstructor(
         str(dataset_path),
         cutoff_radius=5.0,
@@ -252,7 +259,7 @@ def test_phi(device, out_dir):
         train_split=0.8,
         val_split=0.1,
         random_seed=42,
-        split_by_mol_id=True,  # Use same splitting as training
+        split_by_mol_id=True,
     )
 
     _, _, test_loader = dataset.get_dataloaders(num_workers=0)

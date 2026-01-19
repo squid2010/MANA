@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 def scatter_sum(src, index, dim=-1, dim_size=None):
     """
     Native PyTorch implementation of scatter_sum to avoid torch_scatter dependency
@@ -9,16 +10,17 @@ def scatter_sum(src, index, dim=-1, dim_size=None):
     """
     if dim_size is None:
         dim_size = index.max().item() + 1
-        
+
     # Create the output tensor of zeros
     size = list(src.size())
     size[dim] = dim_size
     out = torch.zeros(size, dtype=src.dtype, device=src.device)
-    
-    # index_add_ expects the index to have the same number of dimensions as src? 
+
+    # index_add_ expects the index to have the same number of dimensions as src?
     # No, index_add_ expects a 1D index tensor.
     # We just need to ensure shapes match for the operation.
     return out.index_add_(dim, index, src)
+
 
 class RadialBasisFunction(nn.Module):
     """
@@ -140,16 +142,21 @@ class PhiDeltaHead(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),  # Yield between 0 and 1
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, 1),
         )
+        # Softplus ensures output >= 0, no upper bound (unlike Sigmoid's [0,1])
+        self.activation = nn.Softplus()
 
     def forward(self, h_mol):
         """
         h_mol: (num_molecules, hidden_dim) molecular embeddings
-        returns: (num_molecules, 1) singlet oxygen yield
+        returns: (num_molecules, 1) singlet oxygen yield (non-negative, can exceed 1.0)
         """
-        return self.net(h_mol)
+        return self.activation(self.net(h_mol))
 
 
 class MANA(nn.Module):
@@ -180,16 +187,14 @@ class MANA(nn.Module):
         solvent_dim = 64
         # Encodes Dielectric Constant (1 float) -> Vector (64)
         self.solvent_encoder = nn.Sequential(
-            nn.Linear(1, solvent_dim),
-            nn.SiLU(),
-            nn.Linear(solvent_dim, solvent_dim)
+            nn.Linear(1, solvent_dim), nn.SiLU(), nn.Linear(solvent_dim, solvent_dim)
         )
-        
+
         # Phi Head takes (Mol_Emb + Solv_Emb) = 128 + 64
         self.phi_head = PhiDeltaHead(hidden_dim + solvent_dim)
 
         self._init_weights()
-        
+
         self.register_buffer("lambda_mean", torch.tensor(lambda_mean))
         self.register_buffer("lambda_std", torch.tensor(lambda_std))
 
@@ -232,13 +237,13 @@ class MANA(nn.Module):
             # Expecting data.dielectric to be shape (Batch_Size, 1)
             if not hasattr(data, "dielectric"):
                 raise ValueError("Model expects 'data.dielectric' attribute!")
-            
+
             h_solv = self.solvent_encoder(data.dielectric)
-            
+
             # Concatenate [Molecule, Solvent]
             h_combined = torch.cat([h_mol, h_solv], dim=1)
             results["phi"] = self.phi_head(h_combined).squeeze(-1)
-        
+
         return results
 
     def loss_fn(self, preds, batch):
@@ -255,38 +260,39 @@ class MANA(nn.Module):
         """
         loss = 0
         metrics = {}
-        
+
         if "lambda" in self.tasks and hasattr(batch, "lambda_max"):
             mask = torch.isfinite(batch.lambda_max.squeeze())
             if mask.any():
                 pred_norm = (preds["lambda"][mask] - self.lambda_mean) / self.lambda_std
-                target_norm = (batch.lambda_max[mask] - self.lambda_mean) / self.lambda_std
-                               
-                               
-                loss_lambda = F.huber_loss(
-                    pred_norm, 
-                    target_norm, 
-                    delta=1.0)
+                target_norm = (
+                    batch.lambda_max[mask] - self.lambda_mean
+                ) / self.lambda_std
+
+                loss_lambda = F.huber_loss(pred_norm, target_norm, delta=1.0)
                 loss += loss_lambda
                 metrics["loss_lambda"] = loss_lambda.item()
-                
+
         if "phi" in self.tasks and hasattr(batch, "phi_delta"):
             mask = torch.isfinite(batch.phi_delta.squeeze())
             # if mask.sum() > 1:
             #     phi_pred = preds["phi"][mask]
             #     phi_true = batch.phi_delta[mask]
-        
+
             #     diff_pred = phi_pred.unsqueeze(1) - phi_pred.unsqueeze(0)
             #     diff_true = phi_true.unsqueeze(1) - phi_true.unsqueeze(0)
-        
+
             #     loss_phi = F.relu(-diff_pred * diff_true).mean()
             #     loss += loss_phi
             #     metrics["loss_phi"] = loss_phi.item()
             if mask.any():
-                loss_phi = F.mse_loss(preds["phi"][mask], batch.phi_delta[mask])
+                # Use Huber loss for robustness to outliers in phi values
+                loss_phi = F.huber_loss(
+                    preds["phi"][mask], batch.phi_delta[mask], delta=0.5
+                )
                 loss += loss_phi
                 metrics["loss_phi"] = loss_phi.item()
-                
+
         return loss, metrics
 
     def freeze_backbone(self):

@@ -1,4 +1,5 @@
 import os
+
 import matplotlib
 import numpy as np
 import torch
@@ -232,7 +233,7 @@ class TrainingEngine:
         )
         ax2.set_title("Quantum Yield (Phi) Loss")
         ax2.set_xlabel("Epoch")
-        ax2.set_ylabel("MSE Loss")
+        ax2.set_ylabel("Huber Loss")
         ax2.legend()
         ax2.grid(True)
 

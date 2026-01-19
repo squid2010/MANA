@@ -10,7 +10,7 @@ from tqdm import tqdm
 INPUT_CSV = "data/phidelta_dataset.csv"   
 OUTPUT_HDF5 = "data/phidelta_data.h5"        
 MAX_ATOMS = None  
-NUM_CONFS = 10  # <--- AUGMENTATION FACTOR (10x Data)
+NUM_CONFS = 3  # <--- AUGMENTATION FACTOR (10x Data)
 
 def build_phi_hdf5():
     print(f"Reading {INPUT_CSV}...")

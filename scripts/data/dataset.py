@@ -33,6 +33,8 @@ class DatasetConstructor(Dataset):
         val_split=0.1,
         random_seed=42,
         num_atom_types=None,
+        split_by_mol_id=False,
+        augment_train=False,  # Reserved for future use
     ):
         super().__init__()
 
@@ -46,7 +48,9 @@ class DatasetConstructor(Dataset):
             self.dielectric = f["dielectric"][()]  # pyright: ignore[reportIndexIssue]
 
             raw_smiles = f["smiles"][()]  # pyright: ignore[reportIndexIssue]
-            self.smiles = [s.decode("utf-8") if isinstance(s, bytes) else s for s in raw_smiles]  # pyright: ignore[reportGeneralTypeIssues]
+            self.smiles = [
+                s.decode("utf-8") if isinstance(s, bytes) else s for s in raw_smiles
+            ]  # pyright: ignore[reportGeneralTypeIssues]
 
         # 1. Build Vocabulary
         unique_atoms = set()
@@ -79,14 +83,55 @@ class DatasetConstructor(Dataset):
         np.random.seed(random_seed)
         torch.manual_seed(random_seed)
         torch.cuda.manual_seed_all(random_seed)
-        idx = np.random.permutation(self.n_structures)
 
-        n_train = int(train_split * self.n_structures)
-        n_val = int(val_split * self.n_structures)
+        if split_by_mol_id:
+            # Split by molecule ID to prevent data leakage with augmented datasets
+            # All conformers of the same molecule stay in the same split
+            unique_mol_ids = np.unique(self.mol_ids)
+            np.random.shuffle(unique_mol_ids)
 
-        self.train_indices = idx[:n_train]
-        self.val_indices = idx[n_train : n_train + n_val]
-        self.test_indices = idx[n_train + n_val :]
+            n_mol_train = int(train_split * len(unique_mol_ids))
+            n_mol_val = int(val_split * len(unique_mol_ids))
+
+            train_mol_ids = set(unique_mol_ids[:n_mol_train])
+            val_mol_ids = set(unique_mol_ids[n_mol_train : n_mol_train + n_mol_val])
+            test_mol_ids = set(unique_mol_ids[n_mol_train + n_mol_val :])
+
+            # Map back to sample indices
+            self.train_indices = np.array(
+                [
+                    i
+                    for i in range(self.n_structures)
+                    if self.mol_ids[i] in train_mol_ids
+                ]
+            )
+            self.val_indices = np.array(
+                [i for i in range(self.n_structures) if self.mol_ids[i] in val_mol_ids]
+            )
+            self.test_indices = np.array(
+                [i for i in range(self.n_structures) if self.mol_ids[i] in test_mol_ids]
+            )
+
+            print(f"Split by mol_id: {len(unique_mol_ids)} unique molecules")
+            print(
+                f"  Train: {len(train_mol_ids)} molecules -> {len(self.train_indices)} samples"
+            )
+            print(
+                f"  Val:   {len(val_mol_ids)} molecules -> {len(self.val_indices)} samples"
+            )
+            print(
+                f"  Test:  {len(test_mol_ids)} molecules -> {len(self.test_indices)} samples"
+            )
+        else:
+            # Random split by sample (original behavior)
+            idx = np.random.permutation(self.n_structures)
+
+            n_train = int(train_split * self.n_structures)
+            n_val = int(val_split * self.n_structures)
+
+            self.train_indices = idx[:n_train]
+            self.val_indices = idx[n_train : n_train + n_val]
+            self.test_indices = idx[n_train + n_val :]
 
         train_lambda = self.lambda_max[self.train_indices]  # pyright: ignore[reportIndexIssue]
 
@@ -137,7 +182,9 @@ class DatasetConstructor(Dataset):
             lambda_max=torch.tensor([self.lambda_max[idx]], dtype=torch.float32),  # pyright: ignore[reportIndexIssue]
             phi_delta=torch.tensor([self.phi_delta[idx]], dtype=torch.float32),  # pyright: ignore[reportIndexIssue]
             mol_id=torch.tensor([self.mol_ids[idx]], dtype=torch.int32),  # pyright: ignore[reportIndexIssue]
-            dielectric=torch.tensor([self.dielectric[idx]], dtype=torch.float32).view(1, 1),  # pyright: ignore[reportIndexIssue]
+            dielectric=torch.tensor([self.dielectric[idx]], dtype=torch.float32).view(
+                1, 1
+            ),  # pyright: ignore[reportIndexIssue]
             smiles=self.smiles[idx],
         )
 
