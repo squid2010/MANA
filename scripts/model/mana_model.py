@@ -151,7 +151,7 @@ class PhiDeltaHead(nn.Module):
         )
         # Softplus followed by Sigmoid: Softplus avoids sharp negative saturation while
         # Sigmoid bounds the output to (0, 1) which helps prevent prediction clustering.
-        self.activation = nn.Sequential(nn.Softplus(), nn.Sigmoid())
+        self.activation = nn.Sigmoid()
 
     def forward(self, h_mol):
         """
@@ -206,6 +206,11 @@ class MANA(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+                    
+        if hasattr(self, "phi_head"):
+            final_layer = self.phi_head.net[-1]
+            if isinstance(final_layer, nn.Linear):
+                nn.init.constant_(final_layer.bias, -2.0) # Sigmoid(-2.0) ≈ 0.12
 
     def forward(self, data):
         z, edge_index, edge_attr, batch = (

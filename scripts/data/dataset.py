@@ -34,7 +34,6 @@ class DatasetConstructor(Dataset):
         random_seed=42,
         num_atom_types=None,
         split_by_mol_id=False,
-        augment_train=False,  # Reserved for future use
     ):
         super().__init__()
 

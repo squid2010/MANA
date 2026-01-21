@@ -4,8 +4,8 @@
 *.extxyz
 __pycache__/
 __init__.py
-/benzene/
-/notes/
-/data/
+benzene/
+notes/
 models/
 results/
+/data/
