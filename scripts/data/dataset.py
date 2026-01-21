@@ -140,6 +140,7 @@ class DatasetConstructor(Dataset):
 
     def _process_one(self, idx):
         """Internal helper to process a single molecule index into a Data object"""
+        
         z_raw = self.atomic_numbers[idx]  # pyright: ignore[reportIndexIssue]
 
         # Map atoms
@@ -161,7 +162,7 @@ class DatasetConstructor(Dataset):
         # Since we removed padding, we don't need to filter creating edges
         # We just compute distances on the real atoms
         if pos.size(0) == 0:
-            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_index = torch.emptyd((2, 0), dtype=torch.long)
             edge_attr = torch.empty((0, 4))
         else:
             dist = torch.cdist(pos, pos)

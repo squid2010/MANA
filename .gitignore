@@ -7,3 +7,5 @@ __init__.py
 /benzene/
 /notes/
 /data/
+models/
+results/

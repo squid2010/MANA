@@ -121,6 +121,7 @@ class LambdaMaxHead(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, 1),
         )
 
@@ -148,8 +149,9 @@ class PhiDeltaHead(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim // 2, 1),
         )
-        # Softplus ensures output >= 0, no upper bound (unlike Sigmoid's [0,1])
-        self.activation = nn.Softplus()
+        # Softplus followed by Sigmoid: Softplus avoids sharp negative saturation while
+        # Sigmoid bounds the output to (0, 1) which helps prevent prediction clustering.
+        self.activation = nn.Sequential(nn.Softplus(), nn.Sigmoid())
 
     def forward(self, h_mol):
         """

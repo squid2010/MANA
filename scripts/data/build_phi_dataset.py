@@ -10,7 +10,7 @@ from tqdm import tqdm
 INPUT_CSV = "data/phidelta_dataset.csv"   
 OUTPUT_HDF5 = "data/phidelta_data.h5"        
 MAX_ATOMS = None  
-NUM_CONFS = 3  # <--- AUGMENTATION FACTOR (10x Data)
+NUM_CONFS = 1  # <--- AUGMENTATION FACTOR (1 Data)
 
 def build_phi_hdf5():
     print(f"Reading {INPUT_CSV}...")
@@ -29,6 +29,10 @@ def build_phi_hdf5():
     valid_data = []
     
     for idx, row in tqdm(df.iterrows(), total=len(df)):
+        # Skip phi values that aren't valid
+        if float(row['PhiDelta']) > 1:
+            continue
+            
         smi = row['SMILES']
         try:
             mol = Chem.MolFromSmiles(smi) #pyright: ignore[reportAttributeAccessIssue]
