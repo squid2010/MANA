@@ -7,7 +7,7 @@ import torch
 # ------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------
-NUM_ATOM_TYPES = 118  # Universal constant - covers H(1) through I(53)
+NUM_ATOM_TYPES = 118  # Universal constant
 
 # ------------------------------------------------------------------
 # Add project root to Python path
@@ -38,7 +38,8 @@ def train_head(hyperparams, dataset_path, save_dir, split_by_mol_id, load_model,
     # ------------------------------------------------------------------
     # Dataset
     # ------------------------------------------------------------------
-    # FIX 1: Use the passed 'dataset_path' argument, not the global variable
+    # Using 'split_by_mol_id=True' is generally safer for chemistry to avoid 
+    # data leakage between conformers of the same molecule.
     dataset = DatasetConstructor(
         str(dataset_path),
         cutoff_radius=5.0,
@@ -51,15 +52,11 @@ def train_head(hyperparams, dataset_path, save_dir, split_by_mol_id, load_model,
 
     train_loader, val_loader, _ = dataset.get_dataloaders(num_workers=0)
 
-    print(f"Atom types: {dataset.num_atom_types}")
-    print(f"Training samples: {len(train_loader.dataset)}")  # pyright: ignore
-    print(f"Validation samples: {len(val_loader.dataset)}")  # pyright: ignore
-
-    # Handle NaN means (Phase 3 dataset has no valid Lambda Max, so mean is NaN)
+    # Handle NaN means (Phase 3 dataset has no valid Lambda Max)
     l_mean = dataset.lambda_mean
     l_std = dataset.lambda_std
     if np.isnan(l_mean):
-        l_mean = 500.0 # Default fallback
+        l_mean = 500.0 
         l_std = 100.0
 
     # ------------------------------------------------------------------
@@ -77,11 +74,11 @@ def train_head(hyperparams, dataset_path, save_dir, split_by_mol_id, load_model,
     
     if load_model:
         print(f"Loading weights from: {model_path}")
+        # strict=False allows us to load the backbone even if we are switching heads
         model.load_state_dict(
             torch.load(model_path, map_location=torch.device('cpu')), strict=False
         )
     
-    # FIX 3: Control freezing via argument
     if freeze_backbone:
         print("Freezing Backbone Layers...")
         model.freeze_backbone()
@@ -100,7 +97,6 @@ def train_head(hyperparams, dataset_path, save_dir, split_by_mol_id, load_model,
     # ------------------------------------------------------------------
     # Training Engine
     # ------------------------------------------------------------------
-    # FIX 2: Use the passed 'save_dir' argument, not the global 'save_dir_lambda'
     engine = TrainingEngine(
         model=model,
         device=device,
@@ -117,7 +113,7 @@ def train_head(hyperparams, dataset_path, save_dir, split_by_mol_id, load_model,
     print(f"Device: {device}")
     print(f"Learning rate: {hyperparams['learning_rate']}")
     print(f"Max epochs: {hyperparams['max_epochs']}")
-    print(f"Active Tasks: {hyperparams['tasks']}")
+    print(f"Weight Decay: {hyperparams['weight_decay']}")
     print("-" * 60)
 
     # ------------------------------------------------------------------
@@ -142,7 +138,7 @@ if __name__ == "__main__":
     # Paths
     # ------------------------------------------------------------------
     lambda_dataset_path = project_root / "data" / "lambdamax_data.h5"
-    fluor_dataset_path = project_root / "data" / "flourescence_data.h5" # Check spelling matches your build script
+    fluor_dataset_path = project_root / "data" / "flourescence_data.h5"
     phi_dataset_path = project_root / "data" / "phidelta_data.h5"
 
     save_dir_lambda = project_root / "models" / "lambda"
@@ -153,14 +149,14 @@ if __name__ == "__main__":
     os.makedirs(save_dir_fluor, exist_ok=True)
     os.makedirs(save_dir_phi, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Phase 1: Lambda (Deep4Chem Absorption)
-    # ------------------------------------------------------------------
+    # =================================================================
+    # PHASE 1: PRE-TRAINING (Absorption)
+    # =================================================================
     lambda_hyperparams = {
-        "learning_rate": 5e-4,
-        "max_epochs": 300,
-        "early_stopping_patience": 60,
-        "weight_decay": 1e-5,
+        "learning_rate": 1e-3,     # Fast learning for large dataset
+        "max_epochs": 200,         # 200 is usually enough for convergence
+        "early_stopping_patience": 20, 
+        "weight_decay": 1e-5,      # Standard regularization
         "tasks": ["lambda"],
     }
     
@@ -174,52 +170,52 @@ if __name__ == "__main__":
         freeze_backbone=False
     )
     
-    # ------------------------------------------------------------------
-    # Phase 2: Fluorescence (Deep4Chem Emission)
-    # ------------------------------------------------------------------
-    # Note: We set freeze_backbone=False to allow adaptation
+    # =================================================================
+    # PHASE 2: ADAPTATION (Fluorescence)
+    # =================================================================
     fluor_hyperparams = {
-        "learning_rate": 1e-4, 
-        "max_epochs": 250,
-        "early_stopping_patience": 30,
-        "weight_decay": 1e-4,
-        "tasks": ["phi"],
+        "learning_rate": 1e-4,     # 10x slower to preserve features
+        "max_epochs": 200,
+        "early_stopping_patience": 25,
+        "weight_decay": 1e-5,      
+        "tasks": ["phi"],          # Re-purposing the Phi head
     }
     
-    if (save_dir_lambda / "best_model.pth").exists():
+    p1_model_path = save_dir_lambda / "best_model.pth"
+    if p1_model_path.exists():
         train_head(
             fluor_hyperparams, 
             fluor_dataset_path, 
             save_dir_fluor, 
             split_by_mol_id=True, 
             load_model=True, 
-            model_path=save_dir_lambda / "best_model.pth",
-            freeze_backbone=False # Unfrozen to learn emission physics
+            model_path=p1_model_path,
+            freeze_backbone=False  # Unfrozen: Allow backbone to learn Emission physics
         )
     else:
         print("Skipping Phase 2 (Phase 1 model not found)")
 
-    # ------------------------------------------------------------------
-    # Phase 3: Singlet Oxygen (Wilkinson)
-    # ------------------------------------------------------------------
-    # Note: We set freeze_backbone=True because dataset is small
+    # =================================================================
+    # PHASE 3: SPECIALIZATION (Singlet Oxygen)
+    # =================================================================
     phi_hyperparams = {
-        "learning_rate": 1e-4,
-        "max_epochs": 250,
-        "early_stopping_patience": 30,
-        "weight_decay": 1e-4,
+        "learning_rate": 5e-5,     # Very slow fine-tuning
+        "max_epochs": 150,         # Shorter run for small data
+        "early_stopping_patience": 20,
+        "weight_decay": 1e-3,      # High regularization to prevent overfitting on small data
         "tasks": ["phi"],
     }
     
-    if (save_dir_fluor / "best_model.pth").exists():
+    p2_model_path = save_dir_fluor / "best_model.pth"
+    if p2_model_path.exists():
         train_head(
             phi_hyperparams, 
             phi_dataset_path, 
             save_dir_phi, 
             split_by_mol_id=True, 
             load_model=True, 
-            model_path=save_dir_fluor / "best_model.pth",
-            freeze_backbone=True # Frozen to prevent overfitting
+            model_path=p2_model_path,
+            freeze_backbone=True   # Frozen: Don't break the GNN on 1.4k samples
         )
     else:
         print("Skipping Phase 3 (Phase 2 model not found)")
