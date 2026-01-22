@@ -1,5 +1,4 @@
 *.dat
-*.txt
 *.xyz
 *.extxyz
 __pycache__/
@@ -9,3 +8,4 @@ __init__.py
 /models/
 /results/
 /data/
+/img/
