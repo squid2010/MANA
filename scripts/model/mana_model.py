@@ -122,7 +122,9 @@ class LambdaMaxHead(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, 1),
         )
 
     def forward(self, h_mol):
@@ -182,18 +184,12 @@ class MANA(nn.Module):
         self.layers = nn.ModuleList(
             [PaiNNLayer(hidden_dim, num_rbf) for _ in range(num_layers)]
         )
-
-        # Takes only the molecule embedding (128)
-        self.lambda_head = LambdaMaxHead(hidden_dim)
-
-        solvent_dim = 64
-        # Encodes Dielectric Constant (1 float) -> Vector (64)
-        self.solvent_encoder = nn.Sequential(
-            nn.Linear(1, solvent_dim), nn.SiLU(), nn.Linear(solvent_dim, solvent_dim)
-        )
-
-        # Phi Head takes (Mol_Emb + Solv_Emb) = 128 + 64
-        self.phi_head = PhiDeltaHead(hidden_dim + solvent_dim)
+        
+        combined_dim = hidden_dim * 2
+        
+        # Takes both the molecule embedding (hidden_dim) and the solvent embedding (hidden_dim)
+        self.lambda_head = LambdaMaxHead(combined_dim)
+        self.phi_head = PhiDeltaHead(combined_dim)
 
         self._init_weights()
 
@@ -212,47 +208,50 @@ class MANA(nn.Module):
             if isinstance(final_layer, nn.Linear):
                 nn.init.constant_(final_layer.bias, -2.0) # Sigmoid(-2.0) ≈ 0.12
 
+    def _forward_graph(self, z, edge_index, edge_attr, batch):
+            """Runs the GNN backbone on a specific graph (Solute or Solvent)."""
+            dist = edge_attr[:, 0]
+            rbf = self.rbf(dist)
+            
+            s = self.embedding(z)
+            v = torch.zeros(s.size(0), s.size(1), 3, device=s.device)
+    
+            for layer in self.layers:
+                s, v = layer(s, v, edge_index, edge_attr, rbf)
+    
+            # Global Pooling -> (Batch, Hidden_Dim)
+            h = scatter_sum(s, batch, dim=0)
+            h = h / (torch.bincount(batch).unsqueeze(-1).float() + 1e-9)
+            return h
+
     def forward(self, data):
-        z, edge_index, edge_attr, batch = (
-            data.x,
-            data.edge_index,
-            data.edge_attr,
-            data.batch,
+        # 1. Process Solute (Always exists)
+        h_mol = self._forward_graph(
+            data.x, data.edge_index, data.edge_attr, data.batch
         )
 
-        # 1. Run Backbone
-        dist = edge_attr[:, 0]
-        rbf = self.rbf(dist)
-        s = self.embedding(z)
-        v = torch.zeros(s.size(0), s.size(1), 3, device=s.device)
+        # 2. Process Solvent (Context)
+        if hasattr(data, "x_s") and data.x_s.numel() > 0:
+            h_solv = self._forward_graph(
+                data.x_s, data.edge_index_s, data.edge_attr_s, data.batch_s
+            )
+        else:
+            # Zero padding for solvent if missing (Vacuum/Gas Phase)
+            h_solv = torch.zeros_like(h_mol)
 
-        for layer in self.layers:
-            s, v = layer(s, v, edge_index, edge_attr, rbf)
-
-        # Molecular Embedding
-        h_mol = scatter_sum(s, batch, dim=0)
-        h_mol = h_mol / (torch.bincount(batch).unsqueeze(-1).float() + 1e-9)
+        # 3. Concatenate (Solute + Solvent)
+        h_combined = torch.cat([h_mol, h_solv], dim=1) 
 
         results = {}
 
-        # 2. Lambda Head (Standard)
         if "lambda" in self.tasks:
-            results["lambda"] = self.lambda_head(h_mol).squeeze(-1)
+            results["lambda"] = self.lambda_head(h_combined).squeeze(-1)
 
-        # 3. Phi Head (Solvent Aware)
         if "phi" in self.tasks:
-            # Expecting data.dielectric to be shape (Batch_Size, 1)
-            if not hasattr(data, "dielectric"):
-                raise ValueError("Model expects 'data.dielectric' attribute!")
-
-            h_solv = self.solvent_encoder(data.dielectric)
-
-            # Concatenate [Molecule, Solvent]
-            h_combined = torch.cat([h_mol, h_solv], dim=1)
             results["phi"] = self.phi_head(h_combined).squeeze(-1)
 
         return results
-
+        
     def loss_fn(self, preds, batch):
         """
         Defines the loss function for training.
@@ -307,12 +306,11 @@ class MANA(nn.Module):
         Freeze the backbone layers (embedding, RBF, PaiNN layers, lambda_head).
         Only phi_head and solvent_encoder remain trainable.
         """
-        for param in self.embedding.parameters():
+        for param in self.parameters():
             param.requires_grad = False
-        for param in self.rbf.parameters():
-            param.requires_grad = False
-        for param in self.layers.parameters():
-            param.requires_grad = False
+
         for param in self.lambda_head.parameters():
-            param.requires_grad = False
-        print("✓ Backbone frozen (embedding + RBF + PaiNN layers + lambda_head)")
+            param.requires_grad = True
+        for param in self.phi_head.parameters():
+            param.requires_grad = True
+        print("✓ Backbone frozen. Lambda and Phi Heads are trainable.")
