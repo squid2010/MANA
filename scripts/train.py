@@ -17,13 +17,12 @@ from model.mana_model import MANA
 from model.training_engine import TrainingEngine 
 from data.dataset import DatasetConstructor 
 
-def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None, freeze_backbone=False, aux_dataset_path=None):
+def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None, freeze_backbone=False):
     print("\n" + "=" * 80)
     print(f"STARTING PHASE: {phase_name.upper()}")
     print("=" * 80)
     print(f"Primary Dataset: {dataset_path}")
-    if aux_dataset_path:
-        print(f"Auxiliary Dataset: {aux_dataset_path}")
+    
     print(f"Tasks: {hyperparams['tasks']}")
 
     if not os.path.exists(dataset_path):
@@ -43,26 +42,6 @@ def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None,
     
     train_set = dataset.get_dataloaders(num_workers=0)[0].dataset
     val_set = dataset.get_dataloaders(num_workers=0)[1].dataset
-
-    # 2. Load Auxiliary Dataset (Data Mixing)
-    # This mixes in previous data (with valid Lambda) so the model doesn't "forget"
-    if aux_dataset_path and os.path.exists(aux_dataset_path):
-        print("Mixing in Auxiliary Dataset to prevent catastrophic forgetting...")
-        aux_dataset = DatasetConstructor(
-            str(aux_dataset_path),
-            cutoff_radius=5.0,
-            batch_size=64,
-            train_split=0.8, 
-            val_split=0.1,
-            random_seed=42,
-            split_by_mol_id=True
-        )
-        aux_train = aux_dataset.get_dataloaders(num_workers=0)[0].dataset
-        aux_val = aux_dataset.get_dataloaders(num_workers=0)[1].dataset
-        
-        # Concatenate datasets
-        train_set = ConcatDataset([train_set, aux_train])
-        val_set = ConcatDataset([val_set, aux_val])
 
     # Re-wrap in DataLoaders
     from torch_geometric.loader import DataLoader
@@ -90,7 +69,7 @@ def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None,
         model.load_state_dict(torch.load(load_path, map_location='cpu'), strict=False)
     
     if freeze_backbone:
-        model.freeze_backbone()
+        model.freeze_backbone(hyperparams["tasks"])
     
     # 5. Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

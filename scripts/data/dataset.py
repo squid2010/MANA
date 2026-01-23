@@ -48,38 +48,38 @@ class DatasetConstructor(Dataset):
         print(f"Loading data from {hdf5_file}...")
         with h5py.File(hdf5_file, "r") as f:
             # Solute Data
-            self.atomic_numbers = f["atomic_numbers"][()]
-            self.positions = f["geometries"][()]
+            self.atomic_numbers = f["atomic_numbers"][()] # pyright: ignore[reportIndexIssue]
+            self.positions = f["geometries"][()] # pyright: ignore[reportIndexIssue]
             
             # Solvent Data (Optional, but required for Phi models)
             if "solvent_atomic_numbers" in f:
-                self.solvent_atomic_numbers = f["solvent_atomic_numbers"][()]
-                self.solvent_positions = f["solvent_geometries"][()]
+                self.solvent_atomic_numbers = f["solvent_atomic_numbers"][()] # pyright: ignore[reportIndexIssue]
+                self.solvent_positions = f["solvent_geometries"][()] # pyright: ignore[reportIndexIssue]
                 self.has_solvent = True
             else:
                 self.has_solvent = False
 
             # Targets
-            self.lambda_max = f["lambda_max"][()]
-            self.phi_delta = f["phi_delta"][()]
-            self.mol_ids = f["mol_ids"][()]
+            self.lambda_max = f["lambda_max"][()] # pyright: ignore[reportIndexIssue]
+            self.phi_delta = f["phi_delta"][()] # pyright: ignore[reportIndexIssue]
+            self.mol_ids = f["mol_ids"][()] # pyright: ignore[reportIndexIssue]
             
-            raw_smiles = f["smiles"][()]
-            self.smiles = [s.decode("utf-8") if isinstance(s, bytes) else s for s in raw_smiles]
+            raw_smiles = f["smiles"][()] # pyright: ignore[reportIndexIssue]
+            self.smiles = [s.decode("utf-8") if isinstance(s, bytes) else s for s in raw_smiles] # pyright: ignore[reportGeneralTypeIssues]
 
         # Build Vocabulary (Unified for both solute and solvent)
         unique_atoms = set()
-        for z in self.atomic_numbers:
+        for z in self.atomic_numbers: # pyright: ignore[reportGeneralTypeIssues]
             unique_atoms.update(z[z > 0])
         
         if self.has_solvent:
-            for z in self.solvent_atomic_numbers:
+            for z in self.solvent_atomic_numbers: # pyright: ignore[reportGeneralTypeIssues]
                 unique_atoms.update(z[z > 0])
 
         self.unique_atoms = sorted(list(unique_atoms))
         self.atom_to_index = {a: i + 1 for i, a in enumerate(self.unique_atoms)}
         
-        self.n_structures = self.atomic_numbers.shape[0]
+        self.n_structures = self.atomic_numbers.shape[0] # pyright: ignore[reportAttributeAccessIssue]
 
         # PRE-COMPUTE GRAPHS
         print(f"Pre-processing {self.n_structures} graphs...")
@@ -90,7 +90,7 @@ class DatasetConstructor(Dataset):
         # Create Splits
         np.random.seed(random_seed)
         if split_by_mol_id:
-            unique_mol_ids = np.unique(self.mol_ids)
+            unique_mol_ids = np.unique(self.mol_ids) # pyright: ignore[reportArgumentType, reportCallIssue]
             np.random.shuffle(unique_mol_ids)
             n_mol_train = int(train_split * len(unique_mol_ids))
             n_mol_val = int(val_split * len(unique_mol_ids))
@@ -98,9 +98,9 @@ class DatasetConstructor(Dataset):
             train_ids = set(unique_mol_ids[:n_mol_train])
             val_ids = set(unique_mol_ids[n_mol_train : n_mol_train + n_mol_val])
             
-            self.train_indices = [i for i in range(self.n_structures) if self.mol_ids[i] in train_ids]
-            self.val_indices = [i for i in range(self.n_structures) if self.mol_ids[i] in val_ids]
-            self.test_indices = [i for i in range(self.n_structures) if self.mol_ids[i] not in train_ids and self.mol_ids[i] not in val_ids]
+            self.train_indices = [i for i in range(self.n_structures) if self.mol_ids[i] in train_ids] # pyright: ignore[reportIndexIssue]
+            self.val_indices = [i for i in range(self.n_structures) if self.mol_ids[i] in val_ids] # pyright: ignore[reportIndexIssue]
+            self.test_indices = [i for i in range(self.n_structures) if self.mol_ids[i] not in train_ids and self.mol_ids[i] not in val_ids] # pyright: ignore[reportIndexIssue]
         else:
             idx = np.random.permutation(self.n_structures)
             n_train = int(train_split * self.n_structures)
@@ -110,9 +110,9 @@ class DatasetConstructor(Dataset):
             self.test_indices = idx[n_train + n_val :]
 
         # Stats
-        train_lambda = self.lambda_max[self.train_indices]
-        self.lambda_mean = np.mean(train_lambda)
-        self.lambda_std = np.std(train_lambda)
+        train_lambda = self.lambda_max[self.train_indices] # pyright: ignore[reportIndexIssue]
+        self.lambda_mean = np.mean(train_lambda) # pyright: ignore[reportArgumentType, reportCallIssue]
+        self.lambda_std = np.std(train_lambda) # pyright: ignore[reportArgumentType, reportCallIssue]
 
     def _tensor_from_raw(self, z_raw, pos_raw):
         """Helper to create graph tensors from raw arrays"""
@@ -142,13 +142,13 @@ class DatasetConstructor(Dataset):
     def _process_one(self, idx):
         # 1. Process Solute
         z, pos, edge_index, edge_attr = self._tensor_from_raw(
-            self.atomic_numbers[idx], self.positions[idx]
+            self.atomic_numbers[idx], self.positions[idx] # pyright: ignore[reportIndexIssue]
         )
 
         # 2. Process Solvent (if available)
         if self.has_solvent:
             z_s, pos_s, edge_index_s, edge_attr_s = self._tensor_from_raw(
-                self.solvent_atomic_numbers[idx], self.solvent_positions[idx]
+                self.solvent_atomic_numbers[idx], self.solvent_positions[idx] # pyright: ignore[reportIndexIssue]
             )
             # Create a batch vector for the solvent (all zeros for a single graph)
             # DataLoader will stack these. PairData.__inc__ handles the graph index increment.
@@ -177,9 +177,9 @@ class DatasetConstructor(Dataset):
             batch_s=batch_s,
 
             # Targets
-            lambda_max=torch.tensor([self.lambda_max[idx]], dtype=torch.float32),
-            phi_delta=torch.tensor([self.phi_delta[idx]], dtype=torch.float32),
-            mol_id=torch.tensor([self.mol_ids[idx]], dtype=torch.int32),
+            lambda_max=torch.tensor([self.lambda_max[idx]], dtype=torch.float32), # pyright: ignore[reportIndexIssue]
+            phi_delta=torch.tensor([self.phi_delta[idx]], dtype=torch.float32), # pyright: ignore[reportIndexIssue]
+            mol_id=torch.tensor([self.mol_ids[idx]], dtype=torch.int32), # pyright: ignore[reportIndexIssue]
             smiles=self.smiles[idx],
         )
 
@@ -190,11 +190,11 @@ class DatasetConstructor(Dataset):
         return self.data_list[idx]
     
     def __getitem__(self, idx):
-        return self.data_list[idx]
+        return self.data_list[idx] # pyright: ignore[reportArgumentType, reportCallIssue]
 
     def get_dataloaders(self, num_workers=0):
         return (
-            DataLoader(GeometricSubset(self, self.train_indices), batch_size=self.batch_size, shuffle=True, num_workers=num_workers),
-            DataLoader(GeometricSubset(self, self.val_indices), batch_size=self.batch_size, shuffle=False, num_workers=num_workers),
-            DataLoader(GeometricSubset(self, self.test_indices), batch_size=self.batch_size, shuffle=False, num_workers=num_workers),
+            DataLoader(GeometricSubset(self, self.train_indices), batch_size=self.batch_size, shuffle=True, num_workers=num_workers), # pyright: ignore[reportArgumentType, reportCallIssue]
+            DataLoader(GeometricSubset(self, self.val_indices), batch_size=self.batch_size, shuffle=False, num_workers=num_workers), # pyright: ignore[reportArgumentType, reportCallIssue]
+            DataLoader(GeometricSubset(self, self.test_indices), batch_size=self.batch_size, shuffle=False, num_workers=num_workers), # pyright: ignore[reportArgumentType, reportCallIssue]
         )

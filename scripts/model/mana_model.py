@@ -304,16 +304,18 @@ class MANA(nn.Module):
 
         return loss, metrics
 
-    def freeze_backbone(self):
+    def freeze_backbone(self, heads):
         """
         Freeze the backbone layers (embedding, RBF, PaiNN layers, lambda_head).
         Only phi_head and solvent_encoder remain trainable.
         """
         for param in self.parameters():
             param.requires_grad = False
-
-        for param in self.lambda_head.parameters():
-            param.requires_grad = True
-        for param in self.phi_head.parameters():
-            param.requires_grad = True
-        print("✓ Backbone frozen. Lambda and Phi Heads are trainable.")
+        
+        if "lambda" in heads:
+            for param in self.lambda_head.parameters():
+                param.requires_grad = True
+        if "phi" in heads:
+            for param in self.phi_head.parameters():
+                param.requires_grad = True
+        print(f"✓ Backbone frozen. {heads} head is trainable.")
