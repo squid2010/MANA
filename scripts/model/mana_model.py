@@ -185,7 +185,7 @@ class MANA(nn.Module):
             [PaiNNLayer(hidden_dim, num_rbf) for _ in range(num_layers)]
         )
         
-        combined_dim = hidden_dim * 2
+        combined_dim = hidden_dim * 3
         
         # Takes both the molecule embedding (hidden_dim) and the solvent embedding (hidden_dim)
         self.lambda_head = LambdaMaxHead(combined_dim)
@@ -238,9 +238,12 @@ class MANA(nn.Module):
         else:
             # Zero padding for solvent if missing (Vacuum/Gas Phase)
             h_solv = torch.zeros_like(h_mol)
+            
+        h_mol = F.layer_norm(h_mol, h_mol.shape[1:])
+        h_solv = F.layer_norm(h_solv, h_solv.shape[1:])
 
         # 3. Concatenate (Solute + Solvent)
-        h_combined = torch.cat([h_mol, h_solv], dim=1) 
+        h_combined = torch.cat([h_mol, h_solv, h_mol * h_solv], dim=1) 
 
         results = {}
 
@@ -296,7 +299,7 @@ class MANA(nn.Module):
                 loss_phi = F.huber_loss(
                     preds["phi"][mask], batch.phi_delta[mask], delta=0.5
                 )
-                loss += loss_phi
+                loss += 5 * loss_phi
                 metrics["loss_phi"] = loss_phi.item()
 
         return loss, metrics

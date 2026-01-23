@@ -17,19 +17,20 @@ from model.mana_model import MANA
 from model.training_engine import TrainingEngine 
 from data.dataset import DatasetConstructor 
 
-def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None, freeze_backbone=False):
+def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None, freeze_backbone=False, aux_dataset_path=None):
     print("\n" + "=" * 80)
     print(f"STARTING PHASE: {phase_name.upper()}")
     print("=" * 80)
-    print(f"Dataset: {dataset_path}")
+    print(f"Primary Dataset: {dataset_path}")
+    if aux_dataset_path:
+        print(f"Auxiliary Dataset: {aux_dataset_path}")
     print(f"Tasks: {hyperparams['tasks']}")
 
     if not os.path.exists(dataset_path):
         print(f"ERROR: Dataset not found at {dataset_path}")
         return
 
-    # 1. Dataset
-    # Split by mol_id ensures rigorous validation
+    # 1. Load Primary Dataset
     dataset = DatasetConstructor(
         str(dataset_path),
         cutoff_radius=5.0,
@@ -39,16 +40,40 @@ def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None,
         random_seed=42,
         split_by_mol_id=True, 
     )
+    
+    train_set = dataset.get_dataloaders(num_workers=0)[0].dataset
+    val_set = dataset.get_dataloaders(num_workers=0)[1].dataset
 
-    train_loader, val_loader, _ = dataset.get_dataloaders(num_workers=0)
+    # 2. Load Auxiliary Dataset (Data Mixing)
+    # This mixes in previous data (with valid Lambda) so the model doesn't "forget"
+    if aux_dataset_path and os.path.exists(aux_dataset_path):
+        print("Mixing in Auxiliary Dataset to prevent catastrophic forgetting...")
+        aux_dataset = DatasetConstructor(
+            str(aux_dataset_path),
+            cutoff_radius=5.0,
+            batch_size=64,
+            train_split=0.8, 
+            val_split=0.1,
+            random_seed=42,
+            split_by_mol_id=True
+        )
+        aux_train = aux_dataset.get_dataloaders(num_workers=0)[0].dataset
+        aux_val = aux_dataset.get_dataloaders(num_workers=0)[1].dataset
+        
+        # Concatenate datasets
+        train_set = ConcatDataset([train_set, aux_train])
+        val_set = ConcatDataset([val_set, aux_val])
 
-    # Handle Normalization Stats
-    l_mean = dataset.lambda_mean
-    l_std = dataset.lambda_std
-    l_mean = 500.0 if np.isnan(l_mean) else l_mean
-    l_std = 100.0 if np.isnan(l_std) else l_std
+    # Re-wrap in DataLoaders
+    from torch_geometric.loader import DataLoader
+    train_loader = DataLoader(train_set, batch_size=64, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_set, batch_size=64, shuffle=False, num_workers=0)
 
-    # 2. Model
+    # Handle Normalization Stats (Use primary dataset stats)
+    l_mean = dataset.lambda_mean if not np.isnan(dataset.lambda_mean) else 500.0
+    l_std = dataset.lambda_std if not np.isnan(dataset.lambda_std) else 100.0
+
+    # 3. Model
     model = MANA(
         num_atom_types=NUM_ATOM_TYPES,
         hidden_dim=128,
@@ -59,22 +84,20 @@ def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None,
         lambda_std=l_std,
     )
     
-    # 3. Load Weights
+    # 4. Load Weights
     if load_path:
         print(f"Loading weights from: {load_path}")
-        # strict=False allows us to load weights even if the "tasks" changed 
-        # (e.g. adding a new head in Phase 2)
         model.load_state_dict(torch.load(load_path, map_location='cpu'), strict=False)
     
     if freeze_backbone:
         model.freeze_backbone()
     
-    # 4. Device
+    # 5. Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.backends.mps.is_available(): device = torch.device("mps")
     model = model.to(device)
 
-    # 5. Train
+    # 6. Train
     engine = TrainingEngine(
         model=model,
         device=device,
