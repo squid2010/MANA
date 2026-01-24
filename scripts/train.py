@@ -22,7 +22,6 @@ def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None,
     print(f"STARTING PHASE: {phase_name.upper()}")
     print("=" * 80)
     print(f"Primary Dataset: {dataset_path}")
-    
     print(f"Tasks: {hyperparams['tasks']}")
 
     if not os.path.exists(dataset_path):
@@ -48,11 +47,11 @@ def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None,
     train_loader = DataLoader(train_set, batch_size=64, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=64, shuffle=False, num_workers=0)
 
-    # Handle Normalization Stats (Use primary dataset stats)
+    # Handle Normalization Stats
     l_mean = dataset.lambda_mean if not np.isnan(dataset.lambda_mean) else 500.0
     l_std = dataset.lambda_std if not np.isnan(dataset.lambda_std) else 100.0
 
-    # 3. Model
+    # 2. Model
     model = MANA(
         num_atom_types=NUM_ATOM_TYPES,
         hidden_dim=128,
@@ -63,20 +62,21 @@ def train_phase(phase_name, hyperparams, dataset_path, save_dir, load_path=None,
         lambda_std=l_std,
     )
     
-    # 4. Load Weights
+    # 3. Load Weights
     if load_path:
         print(f"Loading weights from: {load_path}")
+        # strict=False allows loading Phase 1 (Lambda only) into Phase 2 (Lambda + Phi)
         model.load_state_dict(torch.load(load_path, map_location='cpu'), strict=False)
     
     if freeze_backbone:
         model.freeze_backbone(hyperparams["tasks"])
     
-    # 5. Device
+    # 4. Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.backends.mps.is_available(): device = torch.device("mps")
     model = model.to(device)
 
-    # 6. Train
+    # 5. Train
     engine = TrainingEngine(
         model=model,
         device=device,
@@ -97,63 +97,50 @@ if __name__ == "__main__":
 
     # Paths
     lambda_data = project_root / "data" / "lambda" / "lambda_only_data.h5"
-    fluor_data  = project_root / "data" / "fluor" / "fluorescence_data.h5"
     phi_data    = project_root / "data" / "phi" / "phidelta_data.h5"
 
     dir_p1 = project_root / "models" / "phase1_lambda"
-    dir_p2 = project_root / "models" / "phase2_fluor"
-    dir_p3 = project_root / "models" / "phase3_singlet"
+    dir_p2 = project_root / "models" / "phase2_singlet"
     
     os.makedirs(dir_p1, exist_ok=True)
     os.makedirs(dir_p2, exist_ok=True)
-    os.makedirs(dir_p3, exist_ok=True)
 
     # =================================================================
-    # PHASE 1: GENERAL PRE-TRAINING (Lambda Only)
-    # Objective: Learn molecular representation and solvent interaction.
+    # PHASE 1: Lambda Head
+    # Objective: Build absorption representations
     # =================================================================
     p1_params = {
-        "learning_rate": 1e-3, 
-        "max_epochs": 150,
-        "early_stopping_patience": 20, 
+        "learning_rate": 1e-3,
+        "max_epochs": 200,
+        "early_stopping_patience": 40,
         "weight_decay": 1e-5,
-        "tasks": ["lambda"], # Only train lambda head
+        "tasks": ["lambda"], 
     }
     
     train_phase("Phase 1 (Absorption)", p1_params, lambda_data, dir_p1, load_path=None)
     
     # =================================================================
-    # PHASE 2: ADAPTATION (Fluorescence)
-    # Objective: Learn emission physics (Phi_F) while retaining absorption.
+    # PHASE 2: Singlet Oxygen
+    # Objective: Train Phi head + Gentle fine-tuning of backbone
     # =================================================================
     p2_params = {
         "learning_rate": 2e-4, # Lower LR to refine
         "max_epochs": 200,
-        "early_stopping_patience": 25,
-        "weight_decay": 1e-5,      
-        "tasks": ["lambda", "phi"], # Train BOTH heads
+        "early_stopping_patience": 50,
+        "weight_decay": 1e-4,
+        "tasks": ["phi"], # We focus only on phi loss here
     }
     
     p1_model = dir_p1 / "best_model.pth"
+    
     if p1_model.exists():
-        train_phase("Phase 2 (Fluorescence)", p2_params, fluor_data, dir_p2, load_path=p1_model)
+        train_phase(
+            "Phase 2 (Singlet Oxygen)", 
+            p2_params, 
+            phi_data, 
+            dir_p2, 
+            load_path=p1_model, 
+            freeze_backbone=False # MUST be False for differential LR to work
+        )
     else:
         print("Skipping Phase 2 (Phase 1 model missing)")
-
-    # =================================================================
-    # PHASE 3: SPECIALIZATION (Singlet Oxygen)
-    # Objective: Fine-tune Phi head for Phi_Delta.
-    # =================================================================
-    p3_params = {
-        "learning_rate": 5e-5, # Very low LR
-        "max_epochs": 150,
-        "early_stopping_patience": 20,
-        "weight_decay": 1e-3, 
-        "tasks": ["phi"], # Focus on Phi head
-    }
-    
-    p2_model = dir_p2 / "best_model.pth"
-    if p2_model.exists():
-        train_phase("Phase 3 (Singlet Oxygen)", p3_params, phi_data, dir_p3, load_path=p2_model, freeze_backbone=True)
-    else:
-        print("Skipping Phase 3 (Phase 2 model missing)")
