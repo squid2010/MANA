@@ -184,9 +184,9 @@ class MANA(nn.Module):
         self.layers = nn.ModuleList(
             [PaiNNLayer(hidden_dim, num_rbf) for _ in range(num_layers)]
         )
-        
+
         combined_dim = hidden_dim * 3
-        
+
         # Takes both the molecule embedding (hidden_dim) and the solvent embedding (hidden_dim)
         self.lambda_head = LambdaMaxHead(combined_dim)
         self.phi_head = PhiDeltaHead(combined_dim)
@@ -202,26 +202,34 @@ class MANA(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-                    
+
         if hasattr(self, "phi_head"):
             final_layer = self.phi_head.net[-1]
             if isinstance(final_layer, nn.Linear):
                 nn.init.constant_(final_layer.bias, -2.0) # Sigmoid(-2.0) ≈ 0.12
 
-    def _forward_graph(self, z, edge_index, edge_attr, batch):
+    def _forward_graph(self, z, edge_index, edge_attr, batch, dim_size=None):
             """Runs the GNN backbone on a specific graph (Solute or Solvent)."""
             dist = edge_attr[:, 0]
             rbf = self.rbf(dist)
-            
+
             s = self.embedding(z)
             v = torch.zeros(s.size(0), s.size(1), 3, device=s.device)
-    
+
             for layer in self.layers:
                 s, v = layer(s, v, edge_index, edge_attr, rbf)
-    
+
             # Global Pooling -> (Batch, Hidden_Dim)
-            h = scatter_sum(s, batch, dim=0)
-            h = h / (torch.bincount(batch).unsqueeze(-1).float() + 1e-9)
+            # FIX 1: Pass dim_size to scatter_sum to ensure correct output size
+            h = scatter_sum(s, batch, dim=0, dim_size=dim_size)
+            
+            # FIX 2: Ensure bincount matches the dim_size (batch size)
+            if dim_size is not None:
+                counts = torch.bincount(batch, minlength=dim_size)
+            else:
+                counts = torch.bincount(batch)
+                
+            h = h / (counts.unsqueeze(-1).float() + 1e-9)
             return h
 
     def forward(self, data):
@@ -229,21 +237,26 @@ class MANA(nn.Module):
         h_mol = self._forward_graph(
             data.x, data.edge_index, data.edge_attr, data.batch
         )
+        
+        # Get the true batch size from the solute
+        batch_size = h_mol.size(0)
 
         # 2. Process Solvent (Context)
         if hasattr(data, "x_s") and data.x_s.numel() > 0:
+            # FIX 3: Pass batch_size (dim_size) to ensure alignment
             h_solv = self._forward_graph(
-                data.x_s, data.edge_index_s, data.edge_attr_s, data.batch_s
+                data.x_s, data.edge_index_s, data.edge_attr_s, data.batch_s,
+                dim_size=batch_size 
             )
         else:
             # Zero padding for solvent if missing (Vacuum/Gas Phase)
             h_solv = torch.zeros_like(h_mol)
-            
+
         h_mol = F.layer_norm(h_mol, h_mol.shape[1:])
         h_solv = F.layer_norm(h_solv, h_solv.shape[1:])
 
         # 3. Concatenate (Solute + Solvent)
-        h_combined = torch.cat([h_mol, h_solv, h_mol * h_solv], dim=1) 
+        h_combined = torch.cat([h_mol, h_solv, h_mol * h_solv], dim=1)
 
         results = {}
 
@@ -254,18 +267,10 @@ class MANA(nn.Module):
             results["phi"] = self.phi_head(h_combined).squeeze(-1)
 
         return results
-        
+
     def loss_fn(self, preds, batch):
         """
         Defines the loss function for training.
-        preds: Tuple of model predictions (lambda_max, phi_delta)
-        batch: Batch of data with ground truth values:
-            - batch.lambda_max : (B,) or NaN
-            - batch.phi_delta  : (B,) or NaN
-        Returns:
-            - total_loss: Weighted sum of individual losses.
-            - loss_lambda: Absorption maximum loss.
-            - loss_phi: Singlet oxygen yield loss.
         """
         loss = 0
         metrics = {}
@@ -284,18 +289,7 @@ class MANA(nn.Module):
 
         if "phi" in self.tasks and hasattr(batch, "phi_delta"):
             mask = torch.isfinite(batch.phi_delta.squeeze())
-            # if mask.sum() > 1:
-            #     phi_pred = preds["phi"][mask]
-            #     phi_true = batch.phi_delta[mask]
-
-            #     diff_pred = phi_pred.unsqueeze(1) - phi_pred.unsqueeze(0)
-            #     diff_true = phi_true.unsqueeze(1) - phi_true.unsqueeze(0)
-
-            #     loss_phi = F.relu(-diff_pred * diff_true).mean()
-            #     loss += loss_phi
-            #     metrics["loss_phi"] = loss_phi.item()
             if mask.any():
-                # Use Huber loss for robustness to outliers in phi values
                 loss_phi = F.huber_loss(
                     preds["phi"][mask], batch.phi_delta[mask], delta=0.5
                 )
@@ -305,13 +299,9 @@ class MANA(nn.Module):
         return loss, metrics
 
     def freeze_backbone(self, heads):
-        """
-        Freeze the backbone layers (embedding, RBF, PaiNN layers, lambda_head).
-        Only phi_head and solvent_encoder remain trainable.
-        """
         for param in self.parameters():
             param.requires_grad = False
-        
+
         if "lambda" in heads:
             for param in self.lambda_head.parameters():
                 param.requires_grad = True
