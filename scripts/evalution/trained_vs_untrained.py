@@ -305,40 +305,65 @@ def evaluate_dataset(model, device, h5path, task_key):
 def plot_rmse_mae(metrics, out_path, title):
     """
     metrics: {'trainval': {...}, 'test': {...}}
-    Creates a 1x2 figure: [RMSE] [MAE] where each subplot shows two bars: trainval (indigo), test (orange)
+    Single-axis plot showing RMSE and MAE side-by-side per split (train+val vs test).
+    Bars are narrower and the figure is more compact to reduce horizontal whitespace.
     """
     set_style()
     labels = ["train+val", "test"]
     rmse_vals = [metrics["trainval"]["rmse"], metrics["test"]["rmse"]]
     mae_vals = [metrics["trainval"]["mae"], metrics["test"]["mae"]]
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    # RMSE
-    axes[0].bar(0, rmse_vals[0], color=C_PRIMARY, label="train+val")
-    axes[0].bar(1, rmse_vals[1], color=C_ACCENT, label="test")
-    axes[0].set_xticks([0, 1])
-    axes[0].set_xticklabels(labels)
-    axes[0].set_ylabel("RMSE")
-    axes[0].set_title(f"{title} — RMSE")
-    for i, v in enumerate(rmse_vals):
-        axes[0].text(
-            i, v + (abs(v) * 0.01 if not np.isnan(v) else 0.0), f"{v:.3f}", ha="center"
-        )
+    x = np.arange(len(labels))
+    width = 0.22  # narrower bars for compact layout
 
-    # MAE
-    axes[1].bar(0, mae_vals[0], color=C_PRIMARY, label="train+val")
-    axes[1].bar(1, mae_vals[1], color=C_ACCENT, label="test")
-    axes[1].set_xticks([0, 1])
-    axes[1].set_xticklabels(labels)
-    axes[1].set_ylabel("MAE")
-    axes[1].set_title(f"{title} — MAE")
+    # Make the figure itself thinner to reduce empty horizontal space
+    fig, ax = plt.subplots(1, 1, figsize=(6, 3))
+
+    # RMSE bars (solid)
+    ax.bar(x - width / 2, rmse_vals, width, color=[C_PRIMARY, C_ACCENT], label="RMSE")
+
+    # MAE bars (hatched to distinguish)
+    ax.bar(
+        x + width / 2,
+        mae_vals,
+        width,
+        color=[C_PRIMARY, C_ACCENT],
+        alpha=0.9,
+        hatch="//",
+        label="MAE",
+        edgecolor=C_BLACK,
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Error")
+    ax.set_title(f"{title} — RMSE & MAE")
+    ax.legend(fontsize=9)
+
+    # Annotate bars with values (small offset)
+    # Choose offset based on max value to avoid overlap
+    all_vals = np.array([v for v in rmse_vals + mae_vals if not np.isnan(v)])
+    offset = (all_vals.max() - all_vals.min()) * 0.015 if all_vals.size else 0.01
+    offset = offset if offset > 0 else 0.01
+
+    for i, v in enumerate(rmse_vals):
+        y = 0.0 if np.isnan(v) else v
+        ax.text(x[i] - width / 2, y + offset, f"RMSE {y:.3f}", ha="center", fontsize=8)
+
     for i, v in enumerate(mae_vals):
-        axes[1].text(
-            i, v + (abs(v) * 0.01 if not np.isnan(v) else 0.0), f"{v:.3f}", ha="center"
-        )
+        y = 0.0 if np.isnan(v) else v
+        ax.text(x[i] + width / 2, y + offset, f"MAE {y:.3f}", ha="center", fontsize=8)
+
+    # Compact text summary beneath the plot (use slightly less vertical offset)
+    summary = (
+        f"RMSE (train+val / test): {rmse_vals[0]:.3f} / {rmse_vals[1]:.3f}    "
+        f"MAE (train+val / test): {mae_vals[0]:.3f} / {mae_vals[1]:.3f}"
+    )
+    # place text slightly below axis; use bbox_inches='tight' on save to keep it visible
+    fig.text(0.5, -0.06, summary, ha="center", fontsize=9)
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -348,27 +373,42 @@ def plot_spearman_pearson(metrics, out_path, title):
     spear_vals = [metrics["trainval"]["spearman"], metrics["test"]["spearman"]]
     pear_vals = [metrics["trainval"]["pearson"], metrics["test"]["pearson"]]
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    axes[0].bar(0, spear_vals[0], color=C_PRIMARY)
-    axes[0].bar(1, spear_vals[1], color=C_ACCENT)
+    # Slightly narrower figure to reduce whitespace
+    fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+    width = 0.30  # slightly narrower bars
+
+    axes[0].bar([0], [spear_vals[0]], width=width, color=C_PRIMARY)
+    axes[0].bar([1], [spear_vals[1]], width=width, color=C_ACCENT)
     axes[0].set_xticks([0, 1])
     axes[0].set_xticklabels(labels)
     axes[0].set_ylabel("Spearman")
     axes[0].set_title(f"{title} — Spearman")
     for i, v in enumerate(spear_vals):
-        axes[0].text(i, v + 0.01, f"{v:.3f}", ha="center")
+        if np.isnan(v):
+            txt = "nan"
+            val = 0.0
+        else:
+            txt = f"{v:.3f}"
+            val = v
+        axes[0].text(i, val + 0.008, txt, ha="center", fontsize=9)
 
-    axes[1].bar(0, pear_vals[0], color=C_PRIMARY)
-    axes[1].bar(1, pear_vals[1], color=C_ACCENT)
+    axes[1].bar([0], [pear_vals[0]], width=width, color=C_PRIMARY)
+    axes[1].bar([1], [pear_vals[1]], width=width, color=C_ACCENT)
     axes[1].set_xticks([0, 1])
     axes[1].set_xticklabels(labels)
     axes[1].set_ylabel("Pearson")
     axes[1].set_title(f"{title} — Pearson")
     for i, v in enumerate(pear_vals):
-        axes[1].text(i, v + 0.01, f"{v:.3f}", ha="center")
+        if np.isnan(v):
+            txt = "nan"
+            val = 0.0
+        else:
+            txt = f"{v:.3f}"
+            val = v
+        axes[1].text(i, val + 0.008, txt, ha="center", fontsize=9)
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -377,9 +417,11 @@ def plot_pairwise_accuracy(metrics, out_path, title):
     labels = ["train+val", "test"]
     vals = [metrics["trainval"]["pairwise"], metrics["test"]["pairwise"]]
 
-    fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-    ax.bar(0, vals[0], color=C_PRIMARY)
-    ax.bar(1, vals[1], color=C_ACCENT)
+    # Slightly more compact size
+    fig, ax = plt.subplots(1, 1, figsize=(5, 3))
+    width = 0.30
+    ax.bar([0], [vals[0]], width=width, color=C_PRIMARY)
+    ax.bar([1], [vals[1]], width=width, color=C_ACCENT)
     ax.set_xticks([0, 1])
     ax.set_xticklabels(labels)
     ax.set_ylim(0.0, 1.0)
@@ -387,9 +429,10 @@ def plot_pairwise_accuracy(metrics, out_path, title):
     ax.set_title(f"{title} — Pairwise Rank Accuracy")
     for i, v in enumerate(vals):
         text = "nan" if np.isnan(v) else f"{v:.3f}"
-        ax.text(i, (v if not np.isnan(v) else 0.0) + 0.02, text, ha="center")
+        val = 0.0 if np.isnan(v) else v
+        ax.text(i, val + 0.015, text, ha="center", fontsize=9)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 

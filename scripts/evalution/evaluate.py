@@ -56,6 +56,12 @@ C_ACCENT = "#F6A21C"  # Orange
 C_BLACK = "#000000"
 C_GRAY = "#B5BCBE"
 
+# Screening scoring constants (used to compute combined utility score)
+# Matches the scoring used by scripts/screening/analyze_results.py
+NIR_TARGET_NM = 800.0  # Ideal Wavelength (Start of NIR window)
+SIGMA_LAMBDA = 100.0  # Gaussian width for wavelength scoring
+IDEAL_PHI = 1.0  # Ideal quantum yield (used implicitly by clipping)
+
 
 def set_style():
     plt.rcParams["figure.dpi"] = 300
@@ -419,6 +425,58 @@ def generate_report(results, out_dir):
             if df_solvent.shape[0] < len(phi_shift_arr):
                 df_solvent = df_solvent.reindex(range(len(phi_shift_arr)))
             df_solvent.loc[: len(phi_shift_arr) - 1, "phi_shift"] = phi_shift_arr
+
+    # --- COMBINED SCORING & TOTAL RANKING ACCURACY ---
+    # Use the same scoring procedure as screening (Gaussian preference for lambda,
+    # clipping for phi, and product for combined utility).
+    # Only compute if both lambda and phi true/pred arrays are present and aligned.
+    if len(results.get("true_l", [])) > 0 and len(results.get("true_p", [])) > 0:
+        try:
+            true_l = np.array(results["true_l"], dtype=float)
+            pred_l = np.array(results["pred_l"], dtype=float)
+            true_p = np.array(results["true_p"], dtype=float)
+            pred_p = np.array(results["pred_p"], dtype=float)
+
+            # Only compute when arrays are same length (aligned per-sample)
+            if (
+                true_l.size == pred_l.size
+                and true_l.size == true_p.size
+                and true_l.size == pred_p.size
+                and true_l.size > 0
+            ):
+
+                def _lambda_score(arr):
+                    s = np.exp(-((arr - NIR_TARGET_NM) ** 2) / (2 * SIGMA_LAMBDA**2))
+                    # Penalize outside therapeutic window strongly
+                    s = np.where(arr < 600, s * 0.1, s)
+                    s = np.where(arr > 900, s * 0.1, s)
+                    return s
+
+                score_true_l = _lambda_score(true_l)
+                score_pred_l = _lambda_score(pred_l)
+
+                # phi score is simply clipped yield [0,1]
+                score_true_p = np.clip(true_p, 0.0, 1.0)
+                score_pred_p = np.clip(pred_p, 0.0, 1.0)
+
+                combined_true = score_true_l * score_true_p
+                combined_pred = score_pred_l * score_pred_p
+
+                # Pairwise ranking accuracy between true combined utility and predicted combined utility
+                total_rank_acc = pairwise_accuracy(combined_true, combined_pred)
+                if total_rank_acc is not None and not np.isnan(total_rank_acc):
+                    metrics_log.append(
+                        f"Combined Ranking Acc (lambda+phi utility): {total_rank_acc:.4f}"
+                    )
+                    # Also save to a file for easy reference
+                    with open(out_dir / "combined_ranking_accuracy.txt", "w") as f:
+                        f.write(f"{total_rank_acc:.6f}\n")
+                print(f"DEBUG: Combined ranking accuracy {total_rank_acc}")
+        except Exception as e:
+            # Fail silently to avoid breaking the rest of report generation
+            print(f"Exception during scoring computation: {e}")
+        else:
+            print("NOT GONNA COMPUTE")
 
     # --- SOLVENT PLOTS ---
     if not df_solvent.empty:
