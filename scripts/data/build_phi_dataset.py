@@ -69,7 +69,7 @@ def generate_conformers(mol, n_confs):
         try:
             # Optimize all conformers at once
             AllChem.UFFOptimizeMoleculeConfs(mol)
-        except:
+        except Exception as _:
             pass
             
     return mol, list(conf_ids)
@@ -81,7 +81,7 @@ def get_single_conformer(mol):
     if res == 0:
         try:
             AllChem.UFFOptimizeMolecule(mol)
-        except:
+        except Exception as _:
             pass
     return mol, res
 
@@ -108,7 +108,8 @@ def build_phi_hdf5():
         try:
             # --- 1. Process Solvent (Do this first to skip if invalid) ---
             solv_name = str(row['Solvent']).strip()
-            if solv_name.lower() in ["solvent", "none", "nan", ""]: continue
+            if solv_name.lower() in ["solvent", "none", "nan", ""]: 
+                continue
 
             # Check Cache
             if solv_name in solvent_cache:
@@ -122,21 +123,25 @@ def build_phi_hdf5():
                     elif "/" in solv_name:
                          solv_smi = SOLVENT_TO_SMILES.get(solv_name.split("/")[0].strip())
                 
-                if solv_smi is None: continue
+                if solv_smi is None: 
+                    continue
 
                 solv_mol_raw = Chem.MolFromSmiles(solv_smi)
-                if solv_mol_raw is None: continue
+                if solv_mol_raw is None: 
+                    continue
                 
                 # Generate 1 conformer for solvent
                 solv_mol, s_res = get_single_conformer(solv_mol_raw)
-                if s_res != 0: continue
+                if s_res != 0: 
+                    continue
                 
                 solvent_cache[solv_name] = solv_mol
 
             # --- 2. Process Solute (Multiple Conformers) ---
             solute_smi = row['SMILES']
             solute_mol = Chem.MolFromSmiles(solute_smi)
-            if solute_mol is None: continue
+            if solute_mol is None: 
+                continue
             
             # Generate List of Conformers
             solute_mol, conf_ids = generate_conformers(solute_mol, NUM_CONFS)
@@ -157,7 +162,7 @@ def build_phi_hdf5():
                     "solvent_name": solv_name
                 })
             
-        except Exception as e:
+        except Exception as _:
             # print(f"Error on row {idx}: {e}")
             pass
 

@@ -199,6 +199,19 @@ def main():
         dataset_subset = GeometricSubset(dataset, all_indices)
         loader = DataLoader(dataset_subset, batch_size=1, shuffle=False)
 
+    elif input_path.suffix == ".csv":
+        print(f"Reading SMILES from CSV {input_path}...")
+        df = pd.read_csv(input_path)
+        if 'smiles' not in df.columns:
+            print("Error: CSV must contain a 'smiles' column.")
+            return
+        smiles_list = df['smiles'].dropna().astype(str).tolist()
+        
+        # Use our generator class
+        dataset = SMILESGeneratorDataset(smiles_list)
+        from torch_geometric.loader import DataLoader
+        loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    
     else:
         # Assume Text/SMILES input
         print(f"Reading SMILES from {input_path}...")

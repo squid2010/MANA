@@ -398,7 +398,7 @@ def generate_report(results, out_dir):
                 out_dir / "phi_parity.png",
             )
 
-            p_bins = [-np.inf, 0.33, 0.66, np.inf]
+            p_bins = [-np.inf, 0.26, 0.62, np.inf]
             p_lbls = ["Low", "Med", "High"]
             plot_confusion_matrix(
                 y_t[mask],

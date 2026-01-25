@@ -22,7 +22,6 @@ Notes:
 """
 
 import argparse
-import sys
 import textwrap
 from pathlib import Path
 
