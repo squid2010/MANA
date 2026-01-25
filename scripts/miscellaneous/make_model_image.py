@@ -47,12 +47,12 @@ def build_arch_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
         "node",
         shape="rect",
         style="rounded,filled",
-        fontname="Helvetica",
+        fontname="Gill Sans MT",
         fontsize="11",
         width="1.2",
         height="0.6",
     )
-    dot.attr("edge", fontname="Helvetica", fontsize="10")
+    dot.attr("edge", fontname="Gill Sans MT", fontsize="10")
 
     # Solute Input nodes
     dot.node("inp_atoms_solute", "Solute\nAtom types", shape="oval", fillcolor="#B5BCBE", color="#000")
