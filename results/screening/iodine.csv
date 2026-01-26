@@ -1,0 +1,2 @@
+mol_id,smiles,pred_lambda,pred_phi,dist_lambda,score_lambda,score_phi,combined_score
+0,CC1=c2cc3c(cc2=[N+]2C1=Cc1c4cc(I)ccc4c(C)n1[B-]2(F)F)C1=Cc2c4cc(I)ccc4c(C)n2[B-](F)(F)[N+]1=C3C,529.5778,0.6033875,270.42218,0.0025825116,0.6033875,0.0015582552

@@ -181,16 +181,72 @@ def extract_target_from_batch(batch, candidates):
     raise RuntimeError(f"Could not extract target from batch; tried {candidates}")
 
 
-def model_predict_on_loader(model, loader, device, predict_key):
+def model_predict_on_loader(model, loader, device, predict_key, split_label=None):
     """
     Run model over loader and return (preds, targets) as 1D numpy arrays.
     predict_key: 'lambda' or 'phi'
+    split_label: optional label to include in the progress description (e.g. 'train+val' or 'test')
     """
     preds = []
     targets = []
     model.eval()
     with torch.no_grad():
-        for batch in tqdm(loader, desc=f"Evaluating {predict_key}", leave=False):
+        # Determine a robust total for tqdm so the progress bar shows a consistent total/ETA.
+        # Strategy:
+        # 1) Try len(loader) directly.
+        # 2) If that's not available or returns 0, check for a 'loaders' attribute (our Chained wrapper)
+        #    and attempt to sum len() of the underlying loaders.
+        # 3) If no reliable total, leave total unspecified (tqdm will show an open counter).
+        total = None
+        try:
+            _total = len(loader)
+            if _total and _total > 0:
+                total = int(_total)
+        except Exception:
+            total = None
+
+        if total is None:
+            # Try to detect a 'loaders' attribute (e.g. our Chained wrapper) and sum lengths
+            try:
+                if hasattr(loader, "loaders"):
+                    s = 0
+                    ok = True
+                    for l in loader.loaders:
+                        try:
+                            ln = len(l)
+                            s += int(ln)
+                        except Exception:
+                            ok = False
+                            break
+                    if ok and s > 0:
+                        total = s
+            except Exception:
+                total = None
+
+        # Build description text, include split label if provided
+        desc = f"Evaluating {predict_key}"
+        if split_label:
+            desc = f"{desc} ({split_label})"
+
+        # Use leave=False to avoid leaving multiple persistent bars; dynamic_ncols for adaptive width
+        if total is not None and total > 0:
+            iterator = tqdm(
+                loader,
+                desc=desc,
+                total=total,
+                leave=False,
+                dynamic_ncols=True,
+                unit="batch",
+            )
+        else:
+            iterator = tqdm(
+                loader,
+                desc=desc,
+                leave=False,
+                dynamic_ncols=True,
+                unit="batch",
+            )
+        for batch in iterator:
             batch_dev = safe_to_device(batch, device)
             out = model(batch_dev)
             # extract prediction
@@ -232,16 +288,33 @@ def model_predict_on_loader(model, loader, device, predict_key):
 # Dataset evaluation orchestration
 # ---------------------------------------------------------------------
 def combined_loader_from(train_loader, val_loader):
-    """Return an iterable that yields batches from train_loader then val_loader (if present)."""
+    """Return an iterable that yields batches from train_loader then val_loader (if present).
+
+    The returned object implements __iter__ and __len__ so it can be used with
+    tqdm to display a meaningful total count. __len__ attempts to sum the
+    lengths of the underlying loaders; if any loader does not implement __len__
+    we fall back to returning 0 so tqdm won't raise.
+    """
 
     class Chained:
         def __init__(self, loaders):
+            # keep only non-None loaders
             self.loaders = [l for l in loaders if l is not None]
 
         def __iter__(self):
             for l in self.loaders:
                 for b in l:
                     yield b
+
+        def __len__(self):
+            # Provide total number of batches if loaders expose __len__.
+            # This helps tqdm show a proper progress total.
+            try:
+                return sum(len(l) for l in self.loaders)
+            except Exception:
+                # Some loaders (or generator-based loaders) may not implement __len__.
+                # Return 0 in that case so callers can fall back to indeterminate progress.
+                return 0
 
     return Chained([train_loader, val_loader])
 
@@ -257,10 +330,10 @@ def evaluate_dataset(model, device, h5path, task_key):
     trainval_loader = combined_loader_from(train_loader, val_loader)
 
     preds_tv, targets_tv = model_predict_on_loader(
-        model, trainval_loader, device, task_key
+        model, trainval_loader, device, task_key, split_label="train+val"
     )
     preds_test, targets_test = model_predict_on_loader(
-        model, test_loader, device, task_key
+        model, test_loader, device, task_key, split_label="test"
     )
 
     # Ensure minimal alignment
@@ -305,59 +378,101 @@ def evaluate_dataset(model, device, h5path, task_key):
 def plot_rmse_mae(metrics, out_path, title):
     """
     metrics: {'trainval': {...}, 'test': {...}}
-    Single-axis plot showing RMSE and MAE side-by-side per split (train+val vs test).
-    Bars are narrower and the figure is more compact to reduce horizontal whitespace.
+    Grouped plot showing RMSE and MAE as two groups; within each group the
+    train+val and test bars sit adjacent to each other. Increased spacing
+    between metric groups and a legend that shows colors for the splits.
+    The text summary below shows the percent performance drop from train+val -> test.
     """
     set_style()
-    labels = ["train+val", "test"]
+
+    # Prepare values: each metric group will have [train+val, test]
     rmse_vals = [metrics["trainval"]["rmse"], metrics["test"]["rmse"]]
     mae_vals = [metrics["trainval"]["mae"], metrics["test"]["mae"]]
 
-    x = np.arange(len(labels))
-    width = 0.22  # narrower bars for compact layout
+    # Group labels (one group per metric)
+    labels = ["RMSE", "MAE"]
 
-    # Make the figure itself thinner to reduce empty horizontal space
-    fig, ax = plt.subplots(1, 1, figsize=(6, 3))
+    # We'll place groups with extra spacing; within a group, two bars (train+val, test)
+    group_spacing = 1.8  # multiplier to increase space between RMSE and MAE groups
+    x = np.arange(len(labels)) * group_spacing
+    width = 0.35  # wider bars but groups spaced apart
 
-    # RMSE bars (solid)
-    ax.bar(x - width / 2, rmse_vals, width, color=[C_PRIMARY, C_ACCENT], label="RMSE")
+    # Values per-split across groups
+    trainval_vals = [rmse_vals[0], mae_vals[0]]
+    test_vals = [rmse_vals[1], mae_vals[1]]
 
-    # MAE bars (hatched to distinguish)
-    ax.bar(
-        x + width / 2,
-        mae_vals,
-        width,
-        color=[C_PRIMARY, C_ACCENT],
-        alpha=0.9,
-        hatch="//",
-        label="MAE",
-        edgecolor=C_BLACK,
+    fig, ax = plt.subplots(1, 1, figsize=(5, 4.5))
+
+    # Plot bars: train+val on the left side of group, test on the right
+    bars_train = ax.bar(
+        x - width / 2, trainval_vals, width, color=C_PRIMARY, label="train+val"
     )
+    bars_test = ax.bar(x + width / 2, test_vals, width, color=C_ACCENT, label="test")
 
+    # X ticks at group centers
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylabel("Error")
     ax.set_title(f"{title} — RMSE & MAE")
+
+    # Legend should show the colors (split labels); use the bar containers to populate legend
     ax.legend(fontsize=9)
 
     # Annotate bars with values (small offset)
     # Choose offset based on max value to avoid overlap
-    all_vals = np.array([v for v in rmse_vals + mae_vals if not np.isnan(v)])
-    offset = (all_vals.max() - all_vals.min()) * 0.015 if all_vals.size else 0.01
+    all_vals = np.array([v for v in trainval_vals + test_vals if not np.isnan(v)])
+    offset = (all_vals.max() - all_vals.min()) * 0.02 if all_vals.size else 0.01
     offset = offset if offset > 0 else 0.01
 
-    for i, v in enumerate(rmse_vals):
-        y = 0.0 if np.isnan(v) else v
-        ax.text(x[i] - width / 2, y + offset, f"RMSE {y:.3f}", ha="center", fontsize=8)
+    # Annotate train+val and test bars per group
+    for i in range(len(x)):
+        # train+val
+        v_tv = trainval_vals[i]
+        y_tv = 0.0 if np.isnan(v_tv) else v_tv
+        ax.text(x[i] - width / 2, y_tv + offset, f"{y_tv:.3f}", ha="center", fontsize=8)
+        # test
+        v_t = test_vals[i]
+        y_t = 0.0 if np.isnan(v_t) else v_t
+        ax.text(x[i] + width / 2, y_t + offset, f"{y_t:.3f}", ha="center", fontsize=8)
 
-    for i, v in enumerate(mae_vals):
-        y = 0.0 if np.isnan(v) else v
-        ax.text(x[i] + width / 2, y + offset, f"MAE {y:.3f}", ha="center", fontsize=8)
+    # Ensure there's some vertical space above the tallest bar/annotation so labels don't get clipped
+    try:
+        ymin, ymax = ax.get_ylim()
+        # if ymax equals ymin (flat), use small absolute margin
+        if ymax > ymin:
+            margin = (ymax - ymin) * 0.12
+        else:
+            margin = abs(ymax) * 0.12 if ymax != 0 else 0.1
+        ax.set_ylim(ymin, ymax + margin)
+    except Exception:
+        pass
 
-    # Compact text summary beneath the plot (use slightly less vertical offset)
+    # Compute percent change (performance drop) from train+val -> test for errors.
+    def pct_drop(trainval, test):
+        try:
+            if np.isnan(trainval) or np.isnan(test):
+                return float("nan")
+            if trainval == 0:
+                return float("nan")
+            return (test - trainval) / abs(trainval) * 100.0
+        except Exception:
+            return float("nan")
+
+    rmse_drop = pct_drop(rmse_vals[0], rmse_vals[1])
+    mae_drop = pct_drop(mae_vals[0], mae_vals[1])
+
+    # Format the summary to show percent drop with sign and one decimal place.
+    def fmt_pct(x):
+        try:
+            if np.isnan(x):
+                return "nan"
+            return f"{x:+.1f}%"
+        except Exception:
+            return "nan"
+
     summary = (
-        f"RMSE (train+val / test): {rmse_vals[0]:.3f} / {rmse_vals[1]:.3f}    "
-        f"MAE (train+val / test): {mae_vals[0]:.3f} / {mae_vals[1]:.3f}"
+        f"RMSE change (test vs train+val): {fmt_pct(rmse_drop)}    "
+        f"MAE change (test vs train+val): {fmt_pct(mae_drop)}"
     )
     # place text slightly below axis; use bbox_inches='tight' on save to keep it visible
     fig.text(0.5, -0.06, summary, ha="center", fontsize=9)
@@ -374,7 +489,7 @@ def plot_spearman_pearson(metrics, out_path, title):
     pear_vals = [metrics["trainval"]["pearson"], metrics["test"]["pearson"]]
 
     # Slightly narrower figure to reduce whitespace
-    fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+    fig, axes = plt.subplots(1, 2, figsize=(4, 4.5))
     width = 0.30  # slightly narrower bars
 
     axes[0].bar([0], [spear_vals[0]], width=width, color=C_PRIMARY)
@@ -407,6 +522,18 @@ def plot_spearman_pearson(metrics, out_path, title):
             val = v
         axes[1].text(i, val + 0.008, txt, ha="center", fontsize=9)
 
+    # Add some vertical padding to each axis so the annotations don't hit the top
+    try:
+        for a in axes:
+            ymin, ymax = a.get_ylim()
+            if ymax > ymin:
+                margin = (ymax - ymin) * 0.08
+            else:
+                margin = abs(ymax) * 0.08 if ymax != 0 else 0.08
+            a.set_ylim(ymin, ymax + margin)
+    except Exception:
+        pass
+
     plt.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -418,7 +545,7 @@ def plot_pairwise_accuracy(metrics, out_path, title):
     vals = [metrics["trainval"]["pairwise"], metrics["test"]["pairwise"]]
 
     # Slightly more compact size
-    fig, ax = plt.subplots(1, 1, figsize=(5, 3))
+    fig, ax = plt.subplots(1, 1, figsize=(4, 4.5))
     width = 0.30
     ax.bar([0], [vals[0]], width=width, color=C_PRIMARY)
     ax.bar([1], [vals[1]], width=width, color=C_ACCENT)
@@ -431,6 +558,18 @@ def plot_pairwise_accuracy(metrics, out_path, title):
         text = "nan" if np.isnan(v) else f"{v:.3f}"
         val = 0.0 if np.isnan(v) else v
         ax.text(i, val + 0.015, text, ha="center", fontsize=9)
+
+    # Add a bit of headroom above the top (useful since y is bounded at 1.0)
+    try:
+        ymin, ymax = ax.get_ylim()
+        if ymax > ymin:
+            margin = (ymax - ymin) * 0.08
+        else:
+            margin = 0.08
+        ax.set_ylim(ymin, ymax + margin)
+    except Exception:
+        pass
+
     plt.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

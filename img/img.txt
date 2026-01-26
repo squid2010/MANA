@@ -1,0 +1,9 @@
+atomic position ---- rbf ---┐                      lambda head
+                            PaiNN ---- pooling -------┤
+atomic types ---embedding --┘                      concat---phi head
+dielectric constant ----------solvent encoder -------┘
+
+inputs: atomic position, atomic types, dielectric constant
+backbone: 4x painn layers
+output heads: ...
+pooling:...

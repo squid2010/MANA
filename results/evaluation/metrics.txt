@@ -1,0 +1,10 @@
+Lambda RMSE: 12.5222 nm
+Lambda MAE:  4.7037 nm
+Lambda Spearman rho: 0.9872
+Lambda Kendall tau: 0.9475
+Lambda Pairwise Acc: 0.9746
+Phi RMSE: 0.2215
+Phi MAE:  0.1679
+Phi Spearman rho: 0.7174
+Phi Kendall tau: 0.5262
+Phi Pairwise Acc: 0.7652
