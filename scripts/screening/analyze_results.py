@@ -39,6 +39,7 @@ def calculate_scores(df):
     """
     Calculates rankings based on absolute utility for PDT.
     """
+        
     # --- 1. Calculate Distances (Keep this for the Display function) ---
     df["dist_lambda"] = np.abs(df["pred_lambda"] - NIR_TARGET_NM)
 
@@ -66,6 +67,9 @@ def display_top_k(df, k=10):
     pd.set_option('display.max_colwidth', 40)
     pd.set_option('display.width', 1000)
     pd.set_option('display.float_format', '{:.3f}'.format)
+    
+    print("Total in Therapeutic Window with High Yield: " +
+          f"{len(df[(df['pred_lambda'] >= 650) & (df['pred_lambda'] <= 850) & (df['pred_phi'] >= 0.75)])}")
 
     # --- 1. Top Lambda (Closest to Target) ---
     # Uses 'dist_lambda' which we just restored above

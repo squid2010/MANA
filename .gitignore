@@ -1,6 +1,7 @@
 *.dat
 *.xyz
 *.extxyz
+*.h5
 __pycache__/
 __init__.py
 /benzene/

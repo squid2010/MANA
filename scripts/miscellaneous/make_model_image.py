@@ -55,73 +55,132 @@ def build_arch_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
     dot.attr("edge", fontname="Gill Sans MT", fontsize="10")
 
     # Solute Input nodes
-    dot.node("inp_atoms_solute", "Solute\nAtom types", shape="oval", fillcolor="#B5BCBE", color="#000")
+    dot.node(
+        "inp_atoms_solute",
+        "Solute\nAtom types",
+        shape="oval",
+        fillcolor="#B5BCBE",
+        color="#000",
+    )
     dot.node(
         "inp_pos_solute",
         "Solute\nPositions",
         shape="oval",
         fillcolor="#B5BCBE",
-        color="#000"
+        color="#000",
     )
-    
+
     # Solvent Input nodes
-    dot.node("inp_atoms_solvent", "Solvent\nAtom types", shape="oval", fillcolor="#B5BCBE", color="#000")
+    dot.node(
+        "inp_atoms_solvent",
+        "Solvent\nAtom types",
+        shape="oval",
+        fillcolor="#B5BCBE",
+        color="#000",
+    )
     dot.node(
         "inp_pos_solvent",
         "Solvent\nPositions",
         shape="oval",
         fillcolor="#B5BCBE",
-        color="#000"
+        color="#000",
     )
-    
+
     # Solute processing path
     dot.edge("inp_pos_solute", "rbf_solute")
     dot.edge("inp_atoms_solute", "embedding_solute")
 
     dot.node("embedding_solute", "Embedding\n(atom type → vector)", fillcolor="#F6A21C")
     dot.node("rbf_solute", "RBF\n(distance → features)", fillcolor="#F6A21C")
-    
+
     dot.edge("embedding_solute", "backbone_solute")
     dot.edge("rbf_solute", "backbone_solute")
 
     backbone_label = f"PaiNN Backbone\n({num_layers} layers)"
     dot.node(
-        "backbone_solute", backbone_label, shape="rect", fillcolor="#565AA2", fontcolor="#ffffff", fontsize="11"
+        "backbone_solute",
+        backbone_label,
+        shape="rect",
+        fillcolor="#565AA2",
+        fontcolor="#ffffff",
+        fontsize="11",
     )
 
     pool_label = "Pooling\n(mean over atoms)"
-    dot.node("pool_solute", pool_label, fillcolor="#565AA2", fontcolor="#ffffff", fontsize="11")
+    dot.node(
+        "pool_solute",
+        pool_label,
+        fillcolor="#565AA2",
+        fontcolor="#ffffff",
+        fontsize="11",
+    )
     dot.edge("backbone_solute", "pool_solute")
-    
-    dot.node("norm_solute", "Layer Norm", fillcolor="#565AA2", fontcolor="#ffffff", fontsize="11")
+
+    dot.node(
+        "norm_solute",
+        "Layer Norm",
+        fillcolor="#565AA2",
+        fontcolor="#ffffff",
+        fontsize="11",
+    )
     dot.edge("pool_solute", "norm_solute")
 
     # Solvent processing path (parallel)
     dot.edge("inp_pos_solvent", "rbf_solvent")
     dot.edge("inp_atoms_solvent", "embedding_solvent")
 
-    dot.node("embedding_solvent", "Embedding\n(atom type → vector)", fillcolor="#F6A21C")
+    dot.node(
+        "embedding_solvent", "Embedding\n(atom type → vector)", fillcolor="#F6A21C"
+    )
     dot.node("rbf_solvent", "RBF\n(distance → features)", fillcolor="#F6A21C")
-    
+
     dot.edge("embedding_solvent", "backbone_solvent")
     dot.edge("rbf_solvent", "backbone_solvent")
 
     dot.node(
-        "backbone_solvent", backbone_label, shape="rect", fillcolor="#565AA2", fontcolor="#ffffff", fontsize="11"
+        "backbone_solvent",
+        backbone_label,
+        shape="rect",
+        fillcolor="#565AA2",
+        fontcolor="#ffffff",
+        fontsize="11",
     )
 
-    dot.node("pool_solvent", pool_label, fillcolor="#565AA2", fontcolor="#ffffff", fontsize="11")
+    dot.node(
+        "pool_solvent",
+        pool_label,
+        fillcolor="#565AA2",
+        fontcolor="#ffffff",
+        fontsize="11",
+    )
     dot.edge("backbone_solvent", "pool_solvent")
-    
-    dot.node("norm_solvent", "Layer Norm", fillcolor="#565AA2", fontcolor="#ffffff", fontsize="11")
+
+    dot.node(
+        "norm_solvent",
+        "Layer Norm",
+        fillcolor="#565AA2",
+        fontcolor="#ffffff",
+        fontsize="11",
+    )
     dot.edge("pool_solvent", "norm_solvent")
 
     # Interaction and concatenation
-    dot.node("interaction", "Element-wise\nProduct", fillcolor="#565AA2", fontcolor="#ffffff", fontsize="11")
+    dot.node(
+        "interaction",
+        "Element-wise\nProduct",
+        fillcolor="#565AA2",
+        fontcolor="#ffffff",
+        fontsize="11",
+    )
     dot.edge("norm_solute", "interaction")
     dot.edge("norm_solvent", "interaction")
-    
-    dot.node("concat", "Concat\n[h_mol, h_solv, h_mol * h_solv]", fillcolor="#565AA2", fontcolor="#ffffff")
+
+    dot.node(
+        "concat",
+        "Concat\n[h_mol, h_solv, h_mol * h_solv]",
+        fillcolor="#565AA2",
+        fontcolor="#ffffff",
+    )
     dot.edge("norm_solute", "concat")
     dot.edge("norm_solvent", "concat")
     dot.edge("interaction", "concat")
@@ -129,22 +188,79 @@ def build_arch_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
     # Output heads
     dot.node("lambda", "λmax Head\n(MLP → λ_max)", fillcolor="#F6A21C")
     dot.node("phi", "φ Head\n(MLP → φ)", fillcolor="#F6A21C")
-    
+
     dot.edge("concat", "lambda")
     dot.edge("concat", "phi")
 
-    # Force inputs to be at left (same rank)
-    dot.body.append("{ rank = same; inp_atoms_solute; inp_pos_solute; inp_atoms_solvent; inp_pos_solvent; }")
-    # Force embeddings at same rank
-    dot.body.append("{ rank = same; embedding_solute; rbf_solute; embedding_solvent; rbf_solvent; }")
-    # Force backbones at same rank
-    dot.body.append("{ rank = same; backbone_solute; backbone_solvent; }")
-    # Force pooling at same rank
-    dot.body.append("{ rank = same; pool_solute; pool_solvent; }")
-    # Force norms at same rank
-    dot.body.append("{ rank = same; norm_solute; norm_solvent; }")
-    # Force Lambda and Phi heads to be vertically aligned (same rank)
-    dot.body.append("{ rank = same; lambda; phi; }")
+    # Add dashed clusters with numbered section labels for poster-style separation
+    # Clusters group nodes; labels are short (no parenthetical text)
+    with dot.subgraph(name="cluster_1") as c:
+        c.attr(
+            style="dashed",
+            color="gray",
+            label="1) Graph Construction",
+            fontsize="16",
+            fontname="Gill Sans MT",
+            labelloc="t",
+        )
+        c.node("inp_atoms_solute")
+        c.node("inp_pos_solute")
+        c.node("inp_atoms_solvent")
+        c.node("inp_pos_solvent")
+        c.node("embedding_solute")
+        c.node("rbf_solute")
+        c.node("embedding_solvent")
+        c.node("rbf_solvent")
+
+    with dot.subgraph(name="cluster_2") as c:
+        c.attr(
+            style="dashed",
+            color="gray",
+            label="2) Equivariant Message Passing",
+            fontsize="16",
+            fontname="Gill Sans MT",
+            labelloc="t",
+        )
+        c.node("backbone_solute")
+        c.node("backbone_solvent")
+        c.node("pool_solute")
+        c.node("pool_solvent")
+        c.node("norm_solute")
+        c.node("norm_solvent")
+
+    with dot.subgraph(name="cluster_3") as c:
+        c.attr(
+            style="dashed",
+            color="gray",
+            label="3) Context-aware Mechanism",
+            fontsize="16",
+            fontname="Gill Sans MT",
+            labelloc="t",
+            margin="15",
+        )
+        c.node("interaction")
+        c.node("concat")
+
+    # Add invisible edges from the Layer Norms to the interaction node to push
+    # the context-aware nodes down (these are invisible so they only affect layout)
+    # Increased minlen to move the cluster border and its label further away from the wires.
+    dot.edge("norm_solute", "interaction", style="invis", minlen="3")
+    dot.edge("norm_solvent", "interaction", style="invis", minlen="3")
+
+    with dot.subgraph(name="cluster_4") as c:
+        c.attr(
+            style="dashed",
+            color="gray",
+            label="4) Prediction Heads",
+            fontsize="16",
+            fontname="Gill Sans MT",
+            labelloc="t",
+        )
+        c.node("lambda")
+        c.node("phi")
+
+    # Note: removed explicit rank constraints so clusters can contain nodes cleanly.
+    # Layout/ranks can be adjusted separately if desired.
 
     return dot
 
@@ -161,36 +277,36 @@ def build_legend_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
         fontname="Gill Sans MT",
         fontsize="11",
     )
-    
+
     legend_label = textwrap.dedent(f"""
         <b>MANA Architecture Legend</b>
-        
+
         <b>Dual-Graph Processing:</b>
         • Separate PaiNN backbones for solute and solvent
         • Each processes atom types and positions independently
         • Shared embedding and RBF layers
-        
+
         <b>Inputs (per graph):</b>
         • Atom types (z indices)
         • Atomic positions (r coordinates)
-        
+
         <b>Backbone:</b>
         • {num_layers} × PaiNN layers per graph
         • E(3)-equivariant message passing
         • Mean pooling over atoms
-        
+
         <b>Combination:</b>
         • Layer normalization of embeddings
         • Concatenate: [h_mol, h_solv, h_mol * h_solv]
         • Combined dimension: 3 × hidden_dim
-        
+
         <b>Output Heads:</b>
         • λ_max: Absorption maximum wavelength (Huber loss)
         • φ: Singlet oxygen quantum yield (Huber loss, Sigmoid activation)
     """).strip()
-    
+
     dot.node("legend", f"<{legend_label}>", shape="plaintext")
-    
+
     return dot
 
 
@@ -284,7 +400,7 @@ def main():
     # Generate main architecture diagram
     dot = build_arch_graph(num_layers=args.layers, num_nodes=args.nodes)
     write_dot_and_render(dot, out_path, fmt)
-    
+
     # Generate legend diagram
     legend_path = out_path.parent / f"{out_path.stem}_legend{out_path.suffix}"
     legend_dot = build_legend_graph(num_layers=args.layers, num_nodes=args.nodes)
