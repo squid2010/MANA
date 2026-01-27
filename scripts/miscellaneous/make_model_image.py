@@ -40,7 +40,7 @@ def build_arch_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
     - num_layers is used only for labeling (displayed as 'PaiNN x N').
     - num_nodes is only used to annotate pooling (e.g., 'avg over N atoms').
     """
-    dot = Digraph(name="MANA", comment="MANA model architecture", format="png")
+    dot = Digraph(name="MANA", comment="MANA model architecture", format="png") # pyright: ignore[reportPossiblyUnboundVariable]
     # Presentation/style attributes - LR rankdir for horizontal layout
     dot.attr(rankdir="LR", splines="ortho", ranksep="0.5", nodesep="0.3")
     dot.attr(
@@ -194,7 +194,7 @@ def build_arch_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
 
     # Add dashed clusters with numbered section labels for poster-style separation
     # Clusters group nodes; labels are short (no parenthetical text)
-    with dot.subgraph(name="cluster_1") as c:
+    with dot.subgraph(name="cluster_1") as c: # pyright: ignore[reportOptionalContextManager]
         c.attr(
             style="dashed",
             color="gray",
@@ -212,7 +212,7 @@ def build_arch_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
         c.node("embedding_solvent")
         c.node("rbf_solvent")
 
-    with dot.subgraph(name="cluster_2") as c:
+    with dot.subgraph(name="cluster_2") as c: # pyright: ignore[reportOptionalContextManager]
         c.attr(
             style="dashed",
             color="gray",
@@ -228,7 +228,7 @@ def build_arch_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
         c.node("norm_solute")
         c.node("norm_solvent")
 
-    with dot.subgraph(name="cluster_3") as c:
+    with dot.subgraph(name="cluster_3") as c: # pyright: ignore[reportOptionalContextManager]
         c.attr(
             style="dashed",
             color="gray",
@@ -247,7 +247,7 @@ def build_arch_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
     dot.edge("norm_solute", "interaction", style="invis", minlen="3")
     dot.edge("norm_solvent", "interaction", style="invis", minlen="3")
 
-    with dot.subgraph(name="cluster_4") as c:
+    with dot.subgraph(name="cluster_4") as c: # pyright: ignore[reportOptionalContextManager]
         c.attr(
             style="dashed",
             color="gray",
@@ -269,7 +269,7 @@ def build_legend_graph(num_layers: int = 4, num_nodes: int = 6) -> "Digraph":
     """
     Build a separate legend/info diagram.
     """
-    dot = Digraph(name="MANA_Legend", comment="MANA model legend", format="png")
+    dot = Digraph(name="MANA_Legend", comment="MANA model legend", format="png") # pyright: ignore[reportPossiblyUnboundVariable]
     dot.attr(rankdir="TB")
     dot.attr(
         "node",
