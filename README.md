@@ -37,7 +37,6 @@ Solvent Shell   → Embedding → PaiNN Layers → Global Pooling ↗           
 MANA uses a **3-phase training approach**:
 
 1. **Phase 1 - Absorption (λ_max)**: Train backbone and λ_max head on absorption data
-2. **Phase 2 - Fluorescence**: Fine-tune with fluorescence emission data
 3. **Phase 3 - Quantum Yield (Φ_Δ)**: Fine-tune phi head with optional backbone freezing
 
 Each phase supports:
@@ -197,7 +196,6 @@ MANA supports HDF5 datasets with the following structure:
 - positions: float32    # 3D coordinates (N, max_atoms, 3)
 - atomic_numbers: int32 # Atomic numbers (N, max_atoms)
 - lambda_abs: float32   # Absorption wavelength (nm)
-- lambda_flu: float32   # Fluorescence wavelength (nm, optional)
 - phi_delta: float32    # Quantum yield (0-1, optional)
 - solvent_smiles: bytes # Solvent SMILES (optional)
 - mol_id: int32         # Molecule identifier for splitting
@@ -236,23 +234,11 @@ python scripts/miscellaneous/visualize_mol.py \
     --model models/phase2/best_model.pth
 ```
 
-## 🤝 Contributing
-
-This project was developed as part of a research initiative. Contributions, issues, and feature requests are welcome!
-
-## 📄 License
-
-[Specify your license here]
-
 ## 🙏 Acknowledgments
 
 - Built using PyTorch Geometric and RDKit
 - PaiNN architecture inspired by Schütt et al. (2021)
 - Dataset processing leverages the Deep4Chem and Wilkinson photosensitizer databases
-
-## 📧 Contact
-
-[Your contact information]
 
 ## 🔗 References
 
