@@ -241,14 +241,16 @@ python scripts/miscellaneous/visualize_mol.py \
 - PaiNN architecture inspired by Schütt et al. (2021)
 - Dataset processing leverages the Deep4Chem and Wilkinson photosensitizer databases
 
-## 📧 Contact
-
-[Your contact information]
 
 ## 🔗 References
 
 - **PaiNN**: Schütt et al., "Equivariant message passing for the prediction of tensorial properties and molecular spectra", ICML 2021
 - **PyTorch Geometric**: Fey & Lenssen, "Fast Graph Representation Learning with PyTorch Geometric", 2019
+- **Datasets**:
+   - Buglak, A. A., Charisiadis, A., Sheehan, A., Kingsbury, C. J., Senge, M. O., & Filatov, M. A. (2021). Quantitative Structure-Property Relationship Modelling for the Prediction of Singlet Oxygen Generation by Heavy-Atom-Free BODIPY Photosensitizers*. Chemistry (Weinheim an der Bergstrasse, Germany), 27(38), 9934–9947. https://doi.org/10.1002/chem.202100922
+   - Chebotaev, P. P., Buglak, A. A., Sheehan, A., & Filatov, M. A. (2024). Predicting fluorescence to singlet oxygen generation quantum yield ratio for BODIPY dyes using QSPR and machine learning. Phys. Chem. Chem. Phys., 26, 25131–25142. https://doi.org/10.1039/D4CP02471K
+   - Li, J. (2021). A general active learning framework for MoleDesign [GitHub repository]. GitHub. https://github.com/jiali1025/ML_System_for_Photosensitizer_Design
+   - Wilkinson, F., Helman, W. P., & Ross, A. B. (01 1993). Quantum Yields for the Photosensitized Formation of the Lowest Electronically Excited Singlet State of Molecular Oxygen in Solution. Journal of Physical and Chemical Reference Data, 22(1), 113–262. Retrieved from https://srd.nist.gov/jpcrdreprint/1.555934.pdf
 
 ---
 
