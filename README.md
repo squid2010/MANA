@@ -2,7 +2,7 @@
 
 **Molecular Architecture for Near-infrared Absorbers**
 
-A deep learning framework for predicting photophysical properties of photosensitizers using equivariant graph neural networks. MANA predicts absorption wavelengths (λ_max), fluorescence properties, and singlet oxygen quantum yields (Φ_Δ) in solvent-aware environments.
+A deep learning framework for predicting photophysical properties of photosensitizers using equivariant graph neural networks. MANA predicts absorption wavelengths (λ_max) and singlet oxygen quantum yields (Φ_Δ) in solvent-aware environments.
 
 ## 🎯 Overview
 
@@ -11,9 +11,9 @@ MANA is a multi-task neural network architecture built on the PaiNN (Polarizable
 **Key Features:**
 - **E(3)-equivariant** architecture respecting physical symmetries
 - **Solvent-aware** predictions accounting for solvatochromic effects
-- **Multi-phase training** strategy with progressive fine-tuning
+- **Two-phase training** strategy with progressive fine-tuning
 - **3D conformer generation** from SMILES strings
-- Predicts λ_max (absorption), fluorescence wavelengths, and Φ_Δ quantum yields
+- Predicts λ_max (absorption) and Φ_Δ (singlet oxygen quantum yields)
 
 ## 🏗️ Architecture
 
@@ -23,7 +23,7 @@ MANA uses a dual-stream architecture:
 Solute Molecule → Embedding → PaiNN Layers → Global Pooling ↘
                                                                 → Interaction → Task Heads
 Solvent Shell   → Embedding → PaiNN Layers → Global Pooling ↗                   ├─ λ_max
-                                                                                └─ Φ_Δ
+                                                                                  └─ Φ_Δ
 ```
 
 **Core Components:**
@@ -34,10 +34,10 @@ Solvent Shell   → Embedding → PaiNN Layers → Global Pooling ↗           
 
 ## 📊 Training Strategy
 
-MANA uses a **3-phase training approach**:
+MANA uses a **2-phase training approach**:
 
 1. **Phase 1 - Absorption (λ_max)**: Train backbone and λ_max head on absorption data
-3. **Phase 3 - Quantum Yield (Φ_Δ)**: Fine-tune phi head with optional backbone freezing
+2. **Phase 2 - Quantum Yield (Φ_Δ)**: Fine-tune phi head with optional backbone freezing
 
 Each phase supports:
 - Molecular ID-based splitting (prevents conformer leakage)
@@ -95,9 +95,9 @@ train_phase(
     save_dir="models/phase1",
 )
 
-# Phase 2: Fluorescence (load Phase 1 weights)
+# Phase 2: Quantum Yield (load Phase 1 weights)
 hyperparams_p2 = {
-    "tasks": ["lambda", "fluorescence"],
+    "tasks": ["lambda", "phi"],
     "max_epochs": 150,
     "learning_rate": 5e-5,
     "weight_decay": 5e-4,
@@ -105,11 +105,12 @@ hyperparams_p2 = {
 }
 
 train_phase(
-    phase_name="Phase2_Fluorescence", 
+    phase_name="Phase2_QuantumYield", 
     hyperparams=hyperparams_p2,
     dataset_path="data/phi/phidelta_data.h5",
     save_dir="models/phase2",
     load_path="models/phase1/best_model.pth",
+    freeze_backbone=True,  # Optional: freeze backbone to only train phi head
 )
 ```
 
@@ -239,6 +240,10 @@ python scripts/miscellaneous/visualize_mol.py \
 - Built using PyTorch Geometric and RDKit
 - PaiNN architecture inspired by Schütt et al. (2021)
 - Dataset processing leverages the Deep4Chem and Wilkinson photosensitizer databases
+
+## 📧 Contact
+
+[Your contact information]
 
 ## 🔗 References
 
