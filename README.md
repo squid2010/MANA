@@ -23,8 +23,7 @@ MANA uses a dual-stream architecture:
 Solute Molecule → Embedding → PaiNN Layers → Global Pooling ↘
                                                                 → Interaction → Task Heads
 Solvent Shell   → Embedding → PaiNN Layers → Global Pooling ↗                   ├─ λ_max
-                                                                                  ├─ Fluorescence  
-                                                                                  └─ Φ_Δ
+                                                                                └─ Φ_Δ
 ```
 
 **Core Components:**
